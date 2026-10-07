@@ -132,3 +132,16 @@ test('history index is reused inside the window and re-walked on refresh',async 
   assert.equal(files.tokenOptions({refresh:true}).files.length,2,'refresh must re-walk the history tree');
   assert.equal(files.tokenOptions().files.length,2,'the refreshed index becomes the cached one');
 });
+
+test('token history excludes owners belonging to the other CodeBuddy profile',async t=>{
+  const {root,files,base}=fixture(t);
+  const foreign=path.join(root,'user-b','CodeBuddyIDE','user-b','history',path.basename(path.dirname(base)),'foreign');
+  fs.mkdirSync(foreign,{recursive:true});
+  fs.writeFileSync(path.join(foreign,'index.json'),JSON.stringify({messages:[],requests:[]}));
+  const all=files.tokenOptions({refresh:true});
+  assert.equal(all.files.length,2);
+  const filtered=files.tokenOptions({excludeOwners:['user-b']});
+  assert.equal(filtered.files.length,1);
+  assert.equal(filtered.sessionAccounts.foreign,undefined);
+  assert.equal(filtered.sourceSession(path.join(foreign,'index.json')),'');
+});

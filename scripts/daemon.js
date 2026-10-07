@@ -223,6 +223,30 @@ const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
 const codeBuddyFiles = PROFILE.kind === 'codebuddy' ? createCodeBuddyFiles({root: PROFILE.historyRoot, sync:sessionSync}) : null;
 if (codeBuddyFiles) sessionSync = codeBuddyFiles.sync;
+
+// CN and international CodeBuddy share the history tree, but their WorkDaddy
+// account stores are profile-specific. Exclude owners known to the sibling
+// profile so local Token statistics do not mix the two clients. Unknown owners
+// stay eligible because they may be deleted or left by an older installation
+// of the active profile.
+function codeBuddyProfileOwnerIds(profileId) {
+  try {
+    const accountsDir = path.join(profileDataDir(getProfile(profileId)), 'accounts');
+    return new Set(fs.readdirSync(accountsDir)
+      .filter(name => /^[-A-Za-z0-9_]{1,200}\.info$/.test(name))
+      .map(name => name.slice(0, -5)));
+  } catch (_) {
+    return new Set();
+  }
+}
+function codeBuddyForeignOwnerIds() {
+  if (PROFILE.kind !== 'codebuddy') return [];
+  const sibling = PROFILE.id === 'codebuddy-cn' ? 'codebuddy-intl' :
+    PROFILE.id === 'codebuddy-intl' ? 'codebuddy-cn' : '';
+  if (!sibling) return [];
+  const currentOwners = codeBuddyProfileOwnerIds(PROFILE.id);
+  return [...codeBuddyProfileOwnerIds(sibling)].filter(owner => !currentOwners.has(owner));
+}
 const codeBuddyNative = PROFILE.kind === 'codebuddy' ? createCodeBuddyNative({profile: PROFILE, WebSocketCtor}) : null;
 const accountCreditCache = createAccountCreditCache(DATA_DIR);
 const thirdPartyModels = createThirdPartyImport({ targetFile: workbuddyModelsFile(), dataDir: DATA_DIR });
@@ -9890,7 +9914,10 @@ function handleApi(req, res) {
     // depends on the live session registry: conversations deleted in the client
     // keep their files, and history without a session record must not blank out
     // a day. Other clients keep resolving owners through the sessions table.
-    const historyOptions = codeBuddyFiles ? codeBuddyFiles.tokenOptions({ refresh: url.searchParams.get('refresh') === '1' }) : null;
+    const historyOptions = codeBuddyFiles ? codeBuddyFiles.tokenOptions({
+      refresh: url.searchParams.get('refresh') === '1',
+      excludeOwners: codeBuddyForeignOwnerIds(),
+    }) : null;
     const owners = historyOptions ? Promise.resolve(historyOptions.sessionAccounts)
       : sqliteQuery('SELECT id, user_id FROM sessions WHERE deleted_at IS NULL;')
         .then((rows) => Object.fromEntries(rows.map((row) => [String(row.id || ''), String(row.user_id || '')]).filter((item) => item[0] && item[1])));

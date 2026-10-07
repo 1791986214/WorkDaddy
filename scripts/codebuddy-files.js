@@ -132,7 +132,11 @@ function createCodeBuddyFiles({root, sync}) {
   const TOKEN_INDEX_TTL_MS = 15000;
   let tokenIndex = null;
   function tokenOptions(options={}) {
-    if (!options.refresh && tokenIndex && Date.now() - tokenIndex.at < TOKEN_INDEX_TTL_MS) return tokenIndex.value;
+    const excludedOwners = new Set((Array.isArray(options.excludeOwners) ? options.excludeOwners : [])
+      .map(value => String(value || '').trim()).filter(validId));
+    const excludedKey = [...excludedOwners].sort().join('\0');
+    if (!options.refresh && tokenIndex && tokenIndex.excludedKey === excludedKey &&
+        Date.now() - tokenIndex.at < TOKEN_INDEX_TTL_MS) return tokenIndex.value;
     const files=[],owners=new Map(),accounts={};
     function directories(dir) {
       try {return fs.readdirSync(dir,{withFileTypes:true}).filter(entry=>entry.isDirectory()&&!entry.isSymbolicLink());}
@@ -140,6 +144,7 @@ function createCodeBuddyFiles({root, sync}) {
     }
     for(const owner of directories(root)) {
       if(!validId(owner.name))continue;
+      if(excludedOwners.has(owner.name))continue;
       const history=path.join(root,owner.name,'CodeBuddyIDE',owner.name,'history');
       for(const workspace of directories(history)) {
         const base=path.join(history,workspace.name);
@@ -154,7 +159,7 @@ function createCodeBuddyFiles({root, sync}) {
     const value = {files,source:'local-codebuddy-requests',sessionAccounts:accounts,
       sourceSession:file=>owners.get(file) || '',
       readRecords:text=>{const index=parseIndex(text);return Array.isArray(index.requests)?index.requests:[];}};
-    tokenIndex = {at:Date.now(),value};
+    tokenIndex = {at:Date.now(),excludedKey,value};
     return value;
   }
   function collect(id) {
