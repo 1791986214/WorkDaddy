@@ -467,8 +467,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         按拥有目录归属账号），弹窗增加刷新按钮，修复部分日期 Token 记为 0；
 //         Token 统计复用 15s 内的枚举结果并跳过无变化缓存重写，积分历史同步
 //         改为节流落盘（任务结束前强制写一次）。
-const DAEMON_VERSION = '1.2.13';
-const DAEMON_BUILD_ID = 'release-1.2.13-20261007-token-index-credit-persist';
+// 1.2.14：隐藏 WorkBuddy 后台定时任务，自动复制不再跨账号复制后台会话；删除会话与同步 worker 互斥，避免旧记录复活。
+const DAEMON_VERSION = '1.2.14';
+const DAEMON_BUILD_ID = 'release-1.2.14-20261008-session-filter-delete-lock';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -4727,7 +4728,7 @@ async function prepareSessionExport(ids) {
   const selectedIds = normalizeSessionIdBatch(ids);
   if (!selectedIds.length) throw new Error('未选择会话');
   const rows = await sqliteQuery(
-    'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE id IN (' + sqlPlaceholders(selectedIds) + ') AND deleted_at IS NULL;',
+    'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE id IN (' + sqlPlaceholders(selectedIds) + ') AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0;',
     selectedIds
   );
   const byId = new Map(rows.map((row) => [String(row.id), row]));
@@ -5143,7 +5144,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
   const perform = async () => {
     await yieldAutoCopyToRenderer();
     const readRow = async (id, uid) => (await sqliteQuery(
-      'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE id = ? AND user_id = ? AND deleted_at IS NULL LIMIT 1;', [id, uid]
+      'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE id = ? AND user_id = ? AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0 LIMIT 1;', [id, uid]
     ))[0];
     const sourceRow = await readRow(src.id, sourceUid);
     if (!sourceRow) throw new Error('源会话已变化，请重试');
@@ -5170,7 +5171,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
     if (!candidates.length && (!mapping || !mapping.targetId) && sourceRow.cwd) {
       try {
         const fallbackRows = await sqliteQuery(
-          'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE deleted_at IS NULL AND user_id = ? AND cwd = ? AND title = ? AND custom_title = ?;',
+          'SELECT ' + SESSION_COPY_COLUMNS.join(',') + ' FROM sessions WHERE deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0 AND user_id = ? AND cwd = ? AND title = ? AND custom_title = ?;',
           [targetUid, sourceRow.cwd, sourceRow.title || '', sourceRow.custom_title || '']
         );
         for (const row of fallbackRows || []) {
@@ -5378,7 +5379,7 @@ async function buildAutoCopyPlan(sourceUid, targetUid, requestedSessionIds = [])
   if (!rules.allSessions && !rules.sessionIds.length && !rules.workspaces.length && !requested.size) return [];
   const rows = await sqliteQuery(
     'SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id ' +
-    'FROM sessions WHERE deleted_at IS NULL AND user_id = ? ORDER BY created_at DESC;',
+    'FROM sessions WHERE deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0 AND user_id = ? ORDER BY created_at DESC;',
     [source]
   );
   const workspaceSet = new Set(rules.workspaces.map(canonicalWorkspace));
@@ -10426,7 +10427,7 @@ function handleApi(req, res) {
     const uid = uidParam === null ? (((currentAccount() || {}).uid || '').trim()) : uidParam.trim();
     const range = url.searchParams.get('range') || '7d';
     const rangeMs = sessionRangeMs(range);
-    const clauses = ["deleted_at IS NULL"];
+    const clauses = ["deleted_at IS NULL", "COALESCE(is_background_automation, 0) = 0"];
     const params = [];
     if (uid) { clauses.push('user_id = ?'); params.push(uid); }
     // 时间筛选和排序按最近活动/修改时间；旧记录缺字段时回退到创建时间。
@@ -10837,7 +10838,7 @@ function handleApi(req, res) {
       try {
         const rows = await sqliteQuery(
           'SELECT ' + SESSION_COPY_COLUMNS.join(',') +
-            " FROM sessions WHERE id = ? AND (user_id = ? OR user_id = '') AND deleted_at IS NULL LIMIT 1;",
+            " FROM sessions WHERE id = ? AND (user_id = ? OR user_id = '') AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0 LIMIT 1;",
           [id, uid]
         );
         if (!rows.length) return json(res, 404, { ok: false, error: '当前账号下没有该会话' });
@@ -10863,7 +10864,7 @@ function handleApi(req, res) {
       try {
         // 1) 取出源会话（含 cwd 用于定位消息文件）
         const srcRows = await sqliteQuery(
-          "SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id FROM sessions WHERE id IN (" + sqlPlaceholders(ids) + ") AND deleted_at IS NULL;",
+          "SELECT id, cwd, user_id, title, custom_title, status, created_at, updated_at, last_activity_at, is_playground, source_mode, is_background_automation, mode, model, expert_id, expert_locale, expert_runtime_identity, expert_marketplace, permission_mode, use_sandbox_cli, project_id FROM sessions WHERE id IN (" + sqlPlaceholders(ids) + ") AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0;",
           ids
         );
         if (!srcRows.length) return json(res, 404, { ok: false, error: '源会话不存在' });
@@ -10901,7 +10902,7 @@ function handleApi(req, res) {
       try {
         const placeholders = sqlPlaceholders(ids);
         const before = await sqliteQuery(
-          'SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND deleted_at IS NULL;',
+          'SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND deleted_at IS NULL AND COALESCE(is_background_automation, 0) = 0;',
           ids
         );
         await sqliteRun(
@@ -10944,7 +10945,15 @@ function handleApi(req, res) {
       catch (e) { return json(res, 400, { ok: false, error: e.message }); }
       if (!ids.length) return json(res, 400, { ok: false, error: '未选择会话' });
       if (!ids.every(isValidSessionId)) return json(res, 400, { ok: false, error: '包含无效的会话 ID' });
+      let releaseSessionSync = null;
       try {
+        // A copy worker may have already read the source row and be about to
+        // insert/update the destination. Hold the same operation gate used by
+        // account switching so deletion cannot race that write and resurrect
+        // an old task or title after the delete request completes.
+        if (typeof assertAccountSwitchIdle === 'function') {
+          releaseSessionSync = await assertAccountSwitchIdle();
+        }
         // 展开目标会话所在的 lineage：其他账号自动复制出的同源副本一并级联删除，
         // 避免删除后切走再切回时被 auto-copy 原样复制回来（会话「复活」）。
         const requestedSet = new Set(ids.map(String));
@@ -10952,7 +10961,7 @@ function handleApi(req, res) {
         const memberIds = Array.from(new Set(members.map((m) => m.id).filter((id) => isValidSessionId(id))));
         if (!memberIds.length) return json(res, 404, { ok: false, error: '会话不存在或已删除' });
         const placeholders = sqlPlaceholders(memberIds);
-        const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ');', memberIds);
+        const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND COALESCE(is_background_automation, 0) = 0;', memberIds);
         const matchedSet = new Set(before.map((row) => String(row.id || '')));
         const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
         const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
@@ -10983,7 +10992,10 @@ function handleApi(req, res) {
         log(`[sessions-delete] 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}）`);
         return json(res, 200, { ok: true, deleted: matchedIds.length, requested: ids.length, cascaded, filesRemoved, rulesRemoved });
       } catch (e) {
-        return json(res, 500, { ok: false, error: e.message });
+        const status = /账号正在切换|会话同步尚未完成/.test(String(e && e.message || '')) ? 409 : 500;
+        return json(res, status, { ok: false, error: e.message });
+      } finally {
+        if (releaseSessionSync) releaseSessionSync();
       }
     });
   }
