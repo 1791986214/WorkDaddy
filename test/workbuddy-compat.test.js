@@ -179,6 +179,19 @@ test('Windows encrypted-field key lookup honors the configured WorkBuddy target 
   }
 });
 
+test('Windows encrypted-field lookup keeps WorkBuddy key providers available for CodeBuddy imports', () => {
+  const candidates = lib.wdCompatWindowsExeCandidates({
+    localAppData: 'C:\\Users\\tester\\AppData\\Local',
+    profileId: 'codebuddy-cn',
+    configured: 'C:\\Users\\tester\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe',
+  });
+  assert.deepEqual(candidates.slice(0, 2), [
+    'C:\\Users\\tester\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe',
+    'C:\\Users\\tester\\AppData\\Local\\Programs\\WorkBuddyAI\\WorkBuddyAI.exe',
+  ]);
+  assert.equal(candidates.includes('C:\\Users\\tester\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe'), false);
+});
+
 test('account backup keeps both legacy plaintext and encrypted source bytes unchanged', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workdaddy-compat-'));
   try {

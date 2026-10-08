@@ -162,6 +162,22 @@ BUILT_ARCH_PRIORITY="$(/usr/libexec/PlistBuddy -c 'Print :LSArchitecturePriority
 if [ "$BUILT_ARCH_PRIORITY" != "$LS_ARCH_PRIORITY" ]; then exit 3; fi
 sed -i.bak "s|^PROFILE=.*|PROFILE=\"${PROFILE}\"|" "$PACKAGE_APP/Contents/MacOS/launcher"
 rm -f "$PACKAGE_APP/Contents/MacOS/launcher.bak"
+# macOS launcher 缺少 profile 环境变量兜底修复：launchd 注册失败时仍必须让
+# daemon 看到与 plist 相同的 profile/data/port，否则 cdp-targets.js 无法归属企业版页面。
+python3 - "$PACKAGE_APP/Contents/MacOS/launcher" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding='utf-8')
+old = '    nohup "$NODE_BIN" "$SCRIPTS_DIR/daemon.js" >> "$DATA_DIR/daemon.log" 2>&1 &'
+new = '    WBSWITCH_DATA_DIR="$DATA_DIR" WBSWITCH_PORT="$UI_PORT" WBSWITCH_PROFILE="$PROFILE" nohup "$NODE_BIN" "$SCRIPTS_DIR/daemon.js" >> "$DATA_DIR/daemon.log" 2>&1 &'
+if old in source:
+    source = source.replace(old, new, 1)
+elif new not in source:
+    raise SystemExit('macOS launcher 缺少 profile 环境变量兜底修复锚点')
+path.write_text(source, encoding='utf-8', newline='')
+PY
 # 企业版可能在 /Applications 下使用不同的 .app 名称。把官方路径优先、
 # profile 过滤的自动发现逻辑同步进产物 launcher；这样壳内 launcher 与
 # scripts/relaunch-with-cdp.sh 的行为一致。

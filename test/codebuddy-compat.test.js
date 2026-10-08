@@ -31,6 +31,14 @@ test('CodeBuddy injection compiles with all shared pages and the CSP-compatible 
   assert.ok(script.includes('CodeDaddy CN'));assert.ok(script.includes('root.__wbsHTML ='));
   assert.ok(script.includes('__wbsLocalApiRequest'));
 });
+test('CodeBuddy account switching explains an unavailable imported WorkBuddy credential', () => {
+  const start = daemon.indexOf('async function switchAccountForProfile');
+  const end = daemon.indexOf('\nfunction scheduleBackup', start);
+  const source = daemon.slice(start, end);
+  assert.match(source, /wdCompatAuthToken\(session\.auth\)/);
+  assert.match(source, /账号备份中的加密凭据无法解密，请在 WorkBuddy 侧重新登录后再导出/);
+  assert.match(source, /账号备份中无 accessToken/);
+});
 test('CodeBuddy HTML compatibility keeps the official innerHTML sink unchanged', () => {
   const start = daemon.indexOf("  const trustedTypesBootstrap =");
   const end = daemon.indexOf("  let source =", start);

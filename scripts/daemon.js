@@ -439,8 +439,8 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         扩展宿主 indexCache（TTL 5min）不因外部写 index.json 失效，侧边栏
 //         此前要等缓存过期或重启才显示同步的会话。
 // 1.2.11：账号切换刷新只依赖页面重载与同步完成后的列表刷新，避免官方列表重复合并。
-const DAEMON_VERSION = '1.2.11';
-const DAEMON_BUILD_ID = 'release-1.2.11-20261001-account-reload-list-codebuddy-pr345';
+const DAEMON_VERSION = '1.2.12';
+const DAEMON_BUILD_ID = 'release-1.2.12-20261005-issue-358-360-fixes';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -1766,6 +1766,10 @@ async function switchAccountForProfile(uid) {
   const session = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!parseAuthJson(session, {strict:true})) throw new Error('账号备份无效或不属于当前地区');
   if (String(session.account && session.account.uid) !== String(uid)) throw new Error('账号备份标识不匹配');
+  if (!wdCompatAuthToken(session.auth)) {
+    if (wdCompatContainsEncryptedFields(session)) throw new Error('账号备份中的加密凭据无法解密，请在 WorkBuddy 侧重新登录后再导出');
+    throw new Error('账号备份中无 accessToken');
+  }
   const result = await codeBuddyNative.replace(session);
   if (!result || result.uid !== String(uid)) throw new Error('CodeBuddy 未确认账号切换');
   const current = await syncCodeBuddyAuth();

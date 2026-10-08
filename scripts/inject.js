@@ -1421,8 +1421,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var WBS_LANGUAGE_KEY = 'workdaddy.ui.language';
   var WBS_ACCOUNT_MASK_KEY = 'workdaddy.account.mask.' + PROFILE_ID;
   var WBS_INITIAL_AUTO_COPY_ALL_KEY = 'workdaddy.initial.autoCopyAllSessions.' + PROFILE_ID;
+  var WBS_ACCOUNT_NOTE_HOVER_KEY = 'workdaddy.account.noteHover.' + PROFILE_ID;
+  var WBS_GROWTH_PLAN_HOVER_KEY = 'workdaddy.account.growthPlanHover.' + PROFILE_ID;
   var WBS_I18N_EN = {
     '账号备注': 'Account note',
+    '鼠标悬浮显示账号备注': 'Show account note on hover',
     '查看或编辑账号备注': 'View or edit account note',
     '暂无备注，点击添加…': 'No note yet. Click to add…',
     '未保存 ·': 'Unsaved ·',
@@ -1588,6 +1591,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     "Token 用量仅统计本机记录，在不同电脑上查看的数据可能不一致。": "Token usage only includes records on this computer. Figures may differ between computers.",
     "会话输入框非空，未覆盖草稿、未发送": "The composer contains a draft. Nothing was overwritten or sent.",
     '页面就绪': 'Page ready', '删除选中的': 'Delete selected', '删除中…': 'Deleting…', '删除该自动化任务？': 'Delete this automation task?', '删除选中的自动化任务？': 'Delete selected automation tasks?', '删除后无法恢复。': 'This cannot be undone.', '清除': 'Clear', '清除日志': 'Clear logs', '清除运行日志？': 'Clear run logs?', '仅清除已结束的运行记录。': 'Only completed run records will be cleared.', '清除日志失败': 'Failed to clear logs', '任务已启用': 'Task enabled', '任务已停用': 'Task disabled', '发送中': 'Sending',
+    '鼠标悬浮显示成长计划': 'Show growth plan on hover',
     '成长计划读取中': 'Growth plan is loading', '成长计划暂不可用': 'Growth plan is unavailable',
     'Buddy 今日旅行已完成': 'Buddy finished traveling today', 'Buddy 旅行中': 'Buddy is traveling', 'Buddy 待领取礼物': 'Buddy gift pending', 'Buddy 已归来，待领奖': 'Buddy returned; reward pending', 'Buddy 在家': 'Buddy is home', 'Buddy 尚未解锁': 'Buddy is not unlocked',
     '成长任务': 'Growth tasks', '状态暂不可用': 'Status unavailable', '暂不可用': 'Unavailable', '今日旅行已完成': "Today's travel is complete", '旅行中，预计': 'Traveling, expected ', ' 归来': ' return', '旅行中': 'Traveling', '即将归来': 'Returning soon',
@@ -6436,6 +6440,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     function rotationReminderEnabled() {
       try { return localStorage.getItem(rotationReminderKey) !== '0'; } catch (_) { return true; }
     }
+    function accountNoteHoverEnabled() {
+      try { return localStorage.getItem(WBS_ACCOUNT_NOTE_HOVER_KEY) !== '0'; } catch (_) { return true; }
+    }
+    function growthPlanHoverEnabled() {
+      try { return localStorage.getItem(WBS_GROWTH_PLAN_HOVER_KEY) !== '0'; } catch (_) { return true; }
+    }
     // 账号 pane 初始化：顶部 导出/导入 工具栏 + 列表容器 + 底部退出登录按钮（原 foot 的 logout 迁移到账号 tab）
     if (accountsPane) {
       accountsPane.innerHTML =
@@ -6566,12 +6576,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '<div data-fixed-order>' +
         '<div class="wbs-account-order-list" role="list" aria-label="固定账号顺序"></div></div>' +
         '<label class="wbs-account-settings-toggle"><span>积分不足时的账号切换建议</span><span class="wbs-switch"><input type="checkbox" data-rotation-reminder><span class="wbs-switch-slider"></span></span></label>' +
+        '<div class="wbs-account-settings-section">悬浮窗口</div>' +
+        '<label class="wbs-account-settings-toggle"><span>鼠标悬浮显示账号备注</span><span class="wbs-switch"><input type="checkbox" data-account-note-hover><span class="wbs-switch-slider"></span></span></label>' +
+        '<label class="wbs-account-settings-toggle"><span>鼠标悬浮显示成长计划</span><span class="wbs-switch"><input type="checkbox" data-growth-plan-hover><span class="wbs-switch-slider"></span></span></label>' +
         '<div class="wbs-password-error" role="alert"></div><div class="wbs-modal-actions">' +
         '<button class="wbs-modal-btn" type="button" data-order-cancel>取消</button>' +
         '<button class="wbs-modal-btn wbs-modal-ok" type="button" data-order-save>保存</button></div></div>';
       panel.appendChild(mask);
       var list = mask.querySelector('.wbs-account-order-list');
       mask.querySelector('[data-rotation-reminder]').checked = rotationReminderEnabled();
+      mask.querySelector('[data-account-note-hover]').checked = accountNoteHoverEnabled();
+      mask.querySelector('[data-growth-plan-hover]').checked = growthPlanHoverEnabled();
       var busy = false, dragged = null;
       function close() {
         if (busy) return;
@@ -6649,6 +6664,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       mask.querySelector('[data-order-save]').addEventListener('click', function () {
         if (busy) return;
         var reminder = mask.querySelector('[data-rotation-reminder]').checked;
+        var noteHover = mask.querySelector('[data-account-note-hover]').checked;
+        var growthHover = mask.querySelector('[data-growth-plan-hover]').checked;
         busy = true;
         mask.querySelectorAll('button,input').forEach(function (node) { node.disabled = true; });
         mask.querySelector('[data-order-save]').textContent = '保存中…';
@@ -6658,7 +6675,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             var ranks = new Map(); ordered.forEach(function (a, index) { ranks.set(a.uid, index + 1); });
             state.accounts.forEach(function (a) { a.sort = ranks.get(a.uid) || 0; });
             try { localStorage.setItem(rotationReminderKey, reminder ? '1' : '0'); } catch (_) {}
+            try { localStorage.setItem(WBS_ACCOUNT_NOTE_HOVER_KEY, noteHover ? '1' : '0'); } catch (_) {}
+            try { localStorage.setItem(WBS_GROWTH_PLAN_HOVER_KEY, growthHover ? '1' : '0'); } catch (_) {}
             if (!reminder) closeRotationNotice();
+            if (!noteHover && typeof closeAccountNotePopover === 'function') closeAccountNotePopover();
+            if (!growthHover && typeof closeDailyProgressPopover === 'function') closeDailyProgressPopover();
             sortAccountsByCreditExpiry(); reorderAccountCards();
             busy = false; close();
           }).catch(function (error) {
@@ -6955,7 +6976,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
       listen(accountsPane, 'mouseover', function (event) {
         var button = trigger(event.target);
-        if (button && !button.contains(event.relatedTarget)) show(button, false);
+        if (accountNoteHoverEnabled() && button && !button.contains(event.relatedTarget)) show(button, false);
       });
       listen(accountsPane, 'mouseout', function (event) {
         var button = trigger(event.target);
@@ -7066,7 +7087,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       setBuildInterval(updateDailyTravelCountdowns, 1000);
       listen(accountsPane, 'mouseover', function (event) {
         var ring = findRing(event.target);
-        if (!ring || ring === activeRing) return;
+        if (!growthPlanHoverEnabled() || !ring || ring === activeRing) return;
         show(ring, false);
       });
       listen(accountsPane, 'mouseout', function (event) {
