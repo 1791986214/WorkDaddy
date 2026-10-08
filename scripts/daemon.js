@@ -223,6 +223,30 @@ const PROFILE = getProfile();
 const DATA_DIR = defaultDataDir();
 const codeBuddyFiles = PROFILE.kind === 'codebuddy' ? createCodeBuddyFiles({root: PROFILE.historyRoot, sync:sessionSync}) : null;
 if (codeBuddyFiles) sessionSync = codeBuddyFiles.sync;
+
+// CN and international CodeBuddy share the history tree, but their WorkDaddy
+// account stores are profile-specific. Exclude owners known to the sibling
+// profile so local Token statistics do not mix the two clients. Unknown owners
+// stay eligible because they may be deleted or left by an older installation
+// of the active profile.
+function codeBuddyProfileOwnerIds(profileId) {
+  try {
+    const accountsDir = path.join(profileDataDir(getProfile(profileId)), 'accounts');
+    return new Set(fs.readdirSync(accountsDir)
+      .filter(name => /^[-A-Za-z0-9_]{1,200}\.info$/.test(name))
+      .map(name => name.slice(0, -5)));
+  } catch (_) {
+    return new Set();
+  }
+}
+function codeBuddyForeignOwnerIds() {
+  if (PROFILE.kind !== 'codebuddy') return [];
+  const sibling = PROFILE.id === 'codebuddy-cn' ? 'codebuddy-intl' :
+    PROFILE.id === 'codebuddy-intl' ? 'codebuddy-cn' : '';
+  if (!sibling) return [];
+  const currentOwners = codeBuddyProfileOwnerIds(PROFILE.id);
+  return [...codeBuddyProfileOwnerIds(sibling)].filter(owner => !currentOwners.has(owner));
+}
 const codeBuddyNative = PROFILE.kind === 'codebuddy' ? createCodeBuddyNative({profile: PROFILE, WebSocketCtor}) : null;
 const accountCreditCache = createAccountCreditCache(DATA_DIR);
 const thirdPartyModels = createThirdPartyImport({ targetFile: workbuddyModelsFile(), dataDir: DATA_DIR });
@@ -439,8 +463,12 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         扩展宿主 indexCache（TTL 5min）不因外部写 index.json 失效，侧边栏
 //         此前要等缓存过期或重启才显示同步的会话。
 // 1.2.11：账号切换刷新只依赖页面重载与同步完成后的列表刷新，避免官方列表重复合并。
-const DAEMON_VERSION = '1.2.12';
-const DAEMON_BUILD_ID = 'release-1.2.12-20261005-issue-358-360-fixes';
+// 1.2.13：CodeDaddy 用量统计改为扫描官方历史树（含客户端已删除与无登记的会话，
+//         按拥有目录归属账号），弹窗增加刷新按钮，修复部分日期 Token 记为 0；
+//         Token 统计复用 15s 内的枚举结果并跳过无变化缓存重写，积分历史同步
+//         改为节流落盘（任务结束前强制写一次）。
+const DAEMON_VERSION = '1.2.13';
+const DAEMON_BUILD_ID = 'release-1.2.13-20261007-token-index-credit-persist';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -9886,11 +9914,22 @@ function handleApi(req, res) {
     if (url.searchParams.get('cacheStatus') === '1') return json(res, 200, { ok: true, cacheReady: tokenStatsCacheReady(PROFILE.dataRoot, codeBuddyFiles ? {cacheFile:path.join(DATA_DIR,'token-stats-cache.json')} : {}) });
     const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days') || 7)));
     const accounts = listAccounts(DATA_DIR);
-    return sqliteQuery('SELECT id, user_id FROM sessions WHERE deleted_at IS NULL;')
-      .then((rows) => {
-        const sessionAccounts = Object.fromEntries(rows.map((row) => [String(row.id || ''), String(row.user_id || '')]).filter((item) => item[0] && item[1]));
+    // CodeDaddy history trees name their own owner, so its usage no longer
+    // depends on the live session registry: conversations deleted in the client
+    // keep their files, and history without a session record must not blank out
+    // a day. Other clients keep resolving owners through the sessions table.
+    const historyOptions = codeBuddyFiles ? codeBuddyFiles.tokenOptions({
+      refresh: url.searchParams.get('refresh') === '1',
+      excludeOwners: codeBuddyForeignOwnerIds(),
+    }) : null;
+    const owners = historyOptions ? Promise.resolve(historyOptions.sessionAccounts)
+      : sqliteQuery('SELECT id, user_id FROM sessions WHERE deleted_at IS NULL;')
+        .then((rows) => Object.fromEntries(rows.map((row) => [String(row.id || ''), String(row.user_id || '')]).filter((item) => item[0] && item[1])));
+    return owners
+      .then((sessionAccounts) => {
         const stats = scanTokenStatsCached(PROFILE.dataRoot, {
-          ...(codeBuddyFiles ? {...codeBuddyFiles.tokenOptions(rows.map(row=>row.id)),cacheFile:path.join(DATA_DIR,'token-stats-cache.json')} : {}),
+          ...(historyOptions || {}),
+          ...(codeBuddyFiles ? {cacheFile:path.join(DATA_DIR,'token-stats-cache.json')} : {}),
           days,
           account: url.searchParams.get('account') || '',
           model: url.searchParams.get('model') || '',
