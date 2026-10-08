@@ -161,7 +161,7 @@ test('account switching refreshes WorkBuddy after replacing auth without restart
   const route = script.slice(routeStart, routeStart + 5200);
   const copy = route.indexOf('await switchAccountForProfile(uid)');
   assert.notEqual(copy, -1);
-  assert.match(route, /await reloadWorkBuddyPage\(\{ waitForInjection: false \}\)/);
+  assert.match(route, /await reloadWorkBuddyPage\(\{ waitForInjection: false, account: acct \}\)/);
   assert.doesNotMatch(route, /await quitWorkBuddy\(\)/);
   assert.doesNotMatch(route, /await relaunchWorkBuddy\(\)/);
   assert.match(lib, /function retireLogoutMarker/);
