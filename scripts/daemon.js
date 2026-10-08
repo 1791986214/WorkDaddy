@@ -467,8 +467,10 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         按拥有目录归属账号），弹窗增加刷新按钮，修复部分日期 Token 记为 0；
 //         Token 统计复用 15s 内的枚举结果并跳过无变化缓存重写，积分历史同步
 //         改为节流落盘（任务结束前强制写一次）。
-const DAEMON_VERSION = '1.2.13';
-const DAEMON_BUILD_ID = 'release-1.2.13-20261007-token-index-credit-persist';
+// 1.2.14：自动化发送点击触发页面重渲染时，忽略已执行点击返回的 Promise was collected，
+//         继续等待本轮会话回执，避免把已发送消息误报为失败。
+const DAEMON_VERSION = '1.2.14';
+const DAEMON_BUILD_ID = 'release-1.2.14-20261008-automation-send-navigation-race';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -8270,6 +8272,12 @@ async function clearComposerByCdp() {
  */
 async function sendStashToComposer(record) {
   if (!cdp.connected) throw new Error('CDP 未连接，无法发送');
+  // A successful click may destroy the old renderer realm before CDP can
+  // return its result. Retry/ignore this only after the send click (or while
+  // confirming that click), where retrying the action could duplicate a message.
+  const isRendererNavigationRace = (error) => /Promise was collected|Execution context was destroyed|Cannot find (?:default execution context|context with specified id)/i.test(
+    String(error && error.message || error),
+  );
   log('[quick-phrase-diagnostics] composer:start ' + JSON.stringify({ targetUrl: cdp.targetUrl, itemCount: record && record.content && Array.isArray(record.content.items) ? record.content.items.length : 0 }));
   // 等待 AI 空闲：若正在回复，最多等 60 秒；期间前端会提示"等待空闲"
   const idle = await waitAiIdle(60000, record.isCancelled ? 100 : 500, record.isCancelled);
@@ -8661,7 +8669,16 @@ async function sendStashToComposer(record) {
     const value = submitted.result && submitted.result.value;
     if (!value || !value.ok) throw new Error((value && value.error) || 'CodeBuddy 未确认点击发送');
   } else {
-    await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv });
+    try {
+      await cdpMouseClick('automation:sendPhrase', sv.x, sv.y, { textLen: text.length, button: sv });
+    } catch (error) {
+      // The official send handler can navigate/rebuild the renderer immediately
+      // after the click. CDP then reports that the Promise or old execution
+      // context was collected even though the message was already submitted.
+      // Do not click again: continue with the receipt/composer confirmation.
+      if (!isRendererNavigationRace(error)) throw error;
+      log('[quick-phrase-diagnostics] send-click navigation race: ' + String(error && error.message || error));
+    }
   }
   const submittedComposerExpr = `(function(){/* composer-after-submit */
     try {
@@ -8686,7 +8703,7 @@ async function sendStashToComposer(record) {
       submitState = response.result && response.result.value;
       if (submitState && submitState.ok && !submitState.hasContent) break;
     } catch (error) {
-      if (!/Execution context was destroyed|Cannot find (?:default execution context|context with specified id)/i.test(String(error && error.message || error))) throw error;
+      if (!isRendererNavigationRace(error)) throw error;
     }
   }
   if (!submitState || !submitState.ok || submitState.hasContent) {
