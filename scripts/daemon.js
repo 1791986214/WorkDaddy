@@ -467,8 +467,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         按拥有目录归属账号），弹窗增加刷新按钮，修复部分日期 Token 记为 0；
 //         Token 统计复用 15s 内的枚举结果并跳过无变化缓存重写，积分历史同步
 //         改为节流落盘（任务结束前强制写一次）。
-const DAEMON_VERSION = '1.2.13';
-const DAEMON_BUILD_ID = 'release-1.2.13-20261007-token-index-credit-persist';
+// 1.2.14：首页弹窗清理任务跨页面重跑时复用任务级 toast，避免重复点击新建任务堆叠相同提示。
+const DAEMON_VERSION = '1.2.14';
+const DAEMON_BUILD_ID = 'release-1.2.14-20261008-popup-toast-dedupe';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -3579,6 +3580,12 @@ function automationSwitchAccount(account, options = {}) {
   automationAccountSwitchTail = run.catch(() => {});
   return run;
 }
+function automationNotificationNamespace(task, runId) {
+  // Navigation-scoped popup cleanup is intentionally restartable. Its success
+  // notices describe the popup, so a task-level namespace lets a repeated page
+  // navigation update the existing toast instead of stacking another copy.
+  return taskIsPassiveCleanup(task) ? 'automation-task:' + task.id : 'automation:' + runId;
+}
 function startAutomationRun(task, event = null) {
   if (event && (event.navigationSerial == null || event.pageSessionId == null)) event = { ...event, navigationSerial: event.navigationSerial == null ? mainFrameNavigationSerial : event.navigationSerial, pageSessionId: event.pageSessionId || cdpPageSessionId };
   if (automationRuns.size > 200) {
@@ -3786,7 +3793,7 @@ function startAutomationRun(task, event = null) {
       return result;
     } finally { completionReportRunning = false; }
   };
-  const runNotifier = createAutomationNotifier(automationNotifyToast, 'automation:' + id);
+  const runNotifier = createAutomationNotifier(automationNotifyToast, automationNotificationNamespace(task, id));
   run.cleanupNotifications = runNotifier.cleanup;
   const publicAccounts = () => listAccounts(DATA_DIR).map(a => ({uid:a.uid,nickname:a.nickname,isPrimary:primaryAccountStore.get()===a.uid}));
   const publicCurrent = () => { const a = currentAccount(); return a ? {uid:a.uid,nickname:a.nickname,isPrimary:primaryAccountStore.get()===a.uid} : null; };
