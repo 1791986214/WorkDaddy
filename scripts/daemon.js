@@ -467,8 +467,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         按拥有目录归属账号），弹窗增加刷新按钮，修复部分日期 Token 记为 0；
 //         Token 统计复用 15s 内的枚举结果并跳过无变化缓存重写，积分历史同步
 //         改为节流落盘（任务结束前强制写一次）。
-const DAEMON_VERSION = '1.2.13';
-const DAEMON_BUILD_ID = 'release-1.2.13-20261007-token-index-credit-persist';
+// 1.2.14：账号切换重建 renderer 首屏 accountSnapshot，避免 Page.reload 沿用旧账号 URL。
+const DAEMON_VERSION = '1.2.14';
+const DAEMON_BUILD_ID = 'release-1.2.14-20261008-account-snapshot-reload';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -2569,9 +2570,27 @@ async function reloadWorkBuddyPage(options = {}) {
   } catch (error) {
     log(`[cdp] 获取主页面 frame 失败，将在页面加载完成后注入: ${error.message}`);
   }
+  let navigationPlan = null;
+  if (options.account && PROFILE.kind === 'workbuddy') {
+    try {
+      navigationPlan = await withTimeout(readRendererAccountSnapshot(options.account.uid), 10000, '读取切换后的 WorkBuddy 账号');
+    } catch (_) {
+      log('[cdp] 账号快照导航失败，回退页面刷新');
+    }
+  }
   const pending = armPendingReloadInjection(frameId);
   try {
-    await withTimeout(cdpSend('Page.reload', { ignoreCache: false }), 10000, '刷新 WorkBuddy 页面');
+    let navigated = false;
+    if (navigationPlan) {
+      try {
+        const navigation = await withTimeout(cdpSend('Page.navigate', { url: navigationPlan.url }), 10000, '导航 WorkBuddy 页面');
+        if (navigation && navigation.errorText) throw new Error(navigation.errorText);
+        navigated = true;
+      } catch (_) {
+        log('[cdp] 账号快照导航失败，回退页面刷新');
+      }
+    }
+    if (!navigated) await withTimeout(cdpSend('Page.reload', { ignoreCache: false }), 10000, '刷新 WorkBuddy 页面');
     if (options.waitForInjection === false) return true;
     const mounted = await pending.ready;
     if (!mounted) log('[cdp] 页面重载后组件未在 5 秒内确认挂载，继续后台流程');
@@ -2580,6 +2599,44 @@ async function reloadWorkBuddyPage(options = {}) {
     settlePendingReloadInjection(pending, false);
     throw error;
   }
+}
+
+// WorkBuddy 在创建 renderer 时从 URL 的 accountSnapshot 做首屏 hydrate。
+// Page.reload 会保留旧 URL，因此切账号必须用切换后的实时 profile 生成新地址。
+async function readRendererAccountSnapshot(expectedUid) {
+  const uid = String(expectedUid || '').trim();
+  if (!uid) throw new Error('切换账号缺少 uid');
+  const result = await cdpSend('Runtime.evaluate', {
+    expression: `(async function () {
+      var profile = null;
+      try {
+        var account = globalThis.wb && globalThis.wb.account;
+        if (account && typeof account.profile === 'function') profile = await account.profile();
+      } catch (_) {}
+      if (!profile || typeof profile !== 'object') return { error: 'profile-unavailable' };
+      var value = String(profile.uid || '').trim();
+      if (!value) return { error: 'profile-missing-uid' };
+      return { uid: value, nickname: profile.nickname, type: profile.type,
+        editionType: profile.editionType, enterpriseId: profile.enterpriseId,
+        enterpriseName: profile.enterpriseName, enterpriseUserName: profile.enterpriseUserName,
+        avatarUrl: profile.avatarUrl, isPro: profile.isPro, isAdmin: profile.isAdmin,
+        oneidAccountId: profile.oneidAccountId, enableArdotDesign: profile.enableArdotDesign,
+        showDefaultPermission: profile.showDefaultPermission, href: location.href };
+    })()`,
+    awaitPromise: true, returnByValue: true,
+  });
+  const profile = result && result.result && result.result.value;
+  if (!profile || profile.error || String(profile.uid || '') !== uid) throw new Error('切换后的 WorkBuddy 账号未就绪');
+  if (typeof profile.nickname !== 'string' || typeof profile.type !== 'string' || typeof profile.href !== 'string') {
+    throw new Error('切换后的 WorkBuddy 账号资料不完整');
+  }
+  const snapshot = { version: 1, uid, nickname: profile.nickname, type: profile.type, savedAt: Date.now() };
+  for (const key of ['editionType', 'enterpriseId', 'enterpriseName', 'enterpriseUserName', 'avatarUrl', 'isPro', 'isAdmin', 'oneidAccountId', 'enableArdotDesign', 'showDefaultPermission']) {
+    if (profile[key] !== undefined && profile[key] !== null) snapshot[key] = profile[key];
+  }
+  const url = new URL(profile.href);
+  url.searchParams.set('accountSnapshot', encodeURIComponent(JSON.stringify(snapshot)));
+  return { snapshot, url: url.href };
 }
 
 const WORKBUDDY_TARGET = IS_WIN ? null : readWorkBuddyTarget({ dataDir: DATA_DIR, profileId: PROFILE.id });
@@ -3549,7 +3606,7 @@ function automationSwitchAccount(account, options = {}) {
       if (options.isCancelled && options.isCancelled()) throw new Error('任务已停止');
       const acct = await switchAccountForProfile(uid);
       pendingAutomationAccountSwitch = { account: { uid: acct.uid, nickname: acct.nickname } };
-      await reloadWorkBuddyPage();
+      await reloadWorkBuddyPage({ account: acct });
       if (pendingAutomationAccountSwitch) {
         const switchEvent = pendingAutomationAccountSwitch;
         pendingAutomationAccountSwitch = null;
@@ -7545,16 +7602,6 @@ async function restoreNativeAppearanceByCdp() {
     await cdpSend('Runtime.evaluate', {
       expression: `(async function () {
         var WBS_UID = ${JSON.stringify(uid)};
-        // 多账号文件同时存在时 daemon 可能无法唯一解析当前 auth；页面 URL
-        // 仍带有 WorkBuddy 正在展示的 accountSnapshot，优先用它定位快照。
-        try {
-          var rawAccount = new URL(location.href).searchParams.get('accountSnapshot');
-          for (var decodeAttempt = 0; rawAccount && decodeAttempt < 3; decodeAttempt++) {
-            try { rawAccount = decodeURIComponent(rawAccount); } catch (_) { break; }
-          }
-          var pageAccount = JSON.parse(rawAccount || 'null');
-          if (pageAccount && /^[A-Za-z0-9_-]{1,160}$/.test(String(pageAccount.uid || ''))) WBS_UID = String(pageAccount.uid);
-        } catch (_) {}
         var snapshotKey = 'workdaddy.theme.native-snapshot::' + WBS_UID;
         var rawSnapshot = localStorage.getItem(snapshotKey);
         if (!rawSnapshot) return { restored: false };
@@ -7879,14 +7926,6 @@ async function applyThemeByCdp(id, options = {}) {
       window.__wbsThemeAppearanceGuardToken = (window.__wbsThemeAppearanceGuardToken || 0) + 1;
     } catch (_) {}
     var WBS_UID = ${JSON.stringify(uid || null)};
-    try {
-      var rawAccount = new URL(location.href).searchParams.get('accountSnapshot');
-      for (var decodeAttempt = 0; rawAccount && decodeAttempt < 3; decodeAttempt++) {
-        try { rawAccount = decodeURIComponent(rawAccount); } catch (_) { break; }
-      }
-      var pageAccount = JSON.parse(rawAccount || 'null');
-      if (pageAccount && /^[A-Za-z0-9_-]{1,160}$/.test(String(pageAccount.uid || ''))) WBS_UID = String(pageAccount.uid);
-    } catch (_) {}
     // WorkDaddy 自定义主题已应用标记：theme-patches 里部分规则用 html[data-wbs-theme] 限定
     // 只在 WorkDaddy 内置自定义主题下生效（官方默认主题不激活）。
     try { h.setAttribute('data-wbs-theme', ${id === 'default' || id === 'dark' ? "'0'" : "'1'"}); } catch (e) {}
@@ -11541,7 +11580,7 @@ function handleApi(req, res) {
             // readiness promise (which can take the full 5s timeout on a slow
             // renderer). The pending injection remains in place and the copy
             // worker will yield on it before touching session files.
-            await reloadWorkBuddyPage({ waitForInjection: false });
+            await reloadWorkBuddyPage({ waitForInjection: false, account: acct });
             reloaded = true;
             log('[switch] 已通过 CDP 刷新 WorkBuddy 窗口');
             // 某些 renderer 不发送 Page.loadEventFired；给正常 load 事件
