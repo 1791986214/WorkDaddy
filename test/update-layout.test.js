@@ -1382,10 +1382,10 @@ test('automatic session copy filters clean sessions before target queries and sn
   assert.match(daemon, /const dirtyIndex = (?:getSessionDirtyIndex\(\)|typeof getSessionDirtyIndex === 'function'[\s\S]*?getSessionDirtyIndex\(\))[\s\S]*const dirtyRows = selectedRows\.filter\(\(\) => false\);[\s\S]*for \(const row of selectedRows\)[\s\S]*dirtyIndex\.shouldSync\(source, row\.id\)[\s\S]*mappingSourceRevisionMatches/);
   assert.match(daemon, /const SESSION_DIRTY_FILE = (?:path\.join\(DATA_DIR, 'session-dirty\.json'\)|typeof DATA_DIR !== 'undefined'[\s\S]*?session-dirty\.json)/);
   assert.match(daemon, /POST' && p === '\/api\/sessions\/dirty'/);
-  assert.match(daemon, /clearAutoDirty\(\);/);
+  assert.match(daemon, /finishAutoDirty\(targetId, changed\);/);
   assert.match(inject, /function sessionCopyIsNoop\(job\)/);
   assert.match(inject, /if \(sessionCopyIsNoop\(job\)\) \{[\s\S]*closeSessionCopyNotice\(\);/);
-  assert.match(inject, /createSessionDirtyTracker\(function \(payload\)/);
+  assert.match(inject, /createSessionDirtyTracker\(sendSessionDirtyEvents\)/);
   assert.match(inject, /sessionDirtyTracker\.baseline\(records\)/);
 });
 
