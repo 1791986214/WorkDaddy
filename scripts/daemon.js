@@ -470,8 +470,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.14：隐藏 WorkBuddy 后台定时任务、收紧会话删除锁，并在账号切换时重建 renderer 首屏 accountSnapshot。
 // 1.2.14：自动化发送点击触发页面重渲染时，忽略已执行点击返回的 Promise was collected，
 //         继续等待本轮会话回执，避免把已发送消息误报为失败。
-const DAEMON_VERSION = '1.2.14';
-const DAEMON_BUILD_ID = 'release-1.2.14-20261008-account-snapshot-automation-send-race';
+// 1.2.15：补充侧栏会话变化检测，保留多账号同步资格，避免旧会话漏同步及首个目标消费更新标记。
+const DAEMON_VERSION = '1.2.15';
+const DAEMON_BUILD_ID = 'release-1.2.15-20261008-session-sync-dirty-fanout';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -5061,10 +5062,10 @@ function scheduleSessionDirtySave() {
   }, 250);
   if (typeof state.timer.unref === 'function') state.timer.unref();
 }
-function markSessionDirty(uid, sessionId, event) {
+function markSessionDirty(uid, sessionId, event, at) {
   const state = sessionDirtyState || (getSessionDirtyIndex(), sessionDirtyState);
   const before = state.index.get(uid, sessionId);
-  const marker = state.index.mark(uid, sessionId, event);
+  const marker = state.index.mark(uid, sessionId, event, at);
   if (marker && (!before || before.at !== marker.at || before.event !== marker.event)) {
     state.dirty = true;
     scheduleSessionDirtySave();
@@ -5209,8 +5210,27 @@ async function copySessionRecord(src, targetUid, options = {}) {
     const sourceContextWindow = await readSessionContextWindow(sourceRow.id);
     const dirtyIndex = typeof getSessionDirtyIndex === 'function' ? getSessionDirtyIndex() : null;
     const dirtyMarker = options.auto && dirtyIndex ? dirtyIndex.get(sourceUid, sourceRow.id) : null;
-    const clearAutoDirty = () => {
-      if (options.auto && dirtyMarker && typeof clearSessionDirty === 'function') clearSessionDirty(sourceUid, sourceRow.id, dirtyMarker.at);
+    const finishAutoDirty = (targetId, changed = false) => {
+      if (!options.auto) return;
+      if (changed && typeof markSessionDirty === 'function') {
+        // A pairwise copy is not an acknowledgement from every account. Keep
+        // both updated members eligible for other destinations, including a
+        // later return through an already-synchronised account. Per-target
+        // mapping revisions still suppress workers for completed pairs.
+        const retain = (uid, id) => {
+          const current = dirtyIndex && dirtyIndex.get(uid, id);
+          if (!current || current.event !== 'sessionSynced') {
+            // Preserve the timestamp of a concurrent renderer update.
+            markSessionDirty(uid, id, 'sessionSynced', current ? current.at : undefined);
+          }
+        };
+        retain(sourceUid, sourceRow.id);
+        if (targetId) retain(targetUid, targetId);
+        return;
+      }
+      if (dirtyMarker && dirtyMarker.event !== 'sessionSynced' && typeof clearSessionDirty === 'function') {
+        clearSessionDirty(sourceUid, sourceRow.id, dirtyMarker.at);
+      }
     };
     const mapping = getAutoCopyMapping(DATA_DIR, lineageId, targetUid);
     const ids = new Set(getAutoCopySessionMembers(DATA_DIR, lineageId, targetUid));
@@ -5262,7 +5282,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
       const totalBytes = Number(mapping.totalBytes);
       const warning = (Number.isFinite(sourceBytes) ? sourceBytes : 0) > 100 * 1024 * 1024
         ? '会话超过 100 MB，同步可能较慢' : '';
-      clearAutoDirty();
+      finishAutoDirty(existingMappingTarget.id);
       return {
         status: 'skipped', sourceId: sourceRow.id, targetId: existingMappingTarget.id,
         branched: false, failedFiles: 0, warning,
@@ -5322,7 +5342,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
         });
       });
       const warning = left.totalBytes > 100 * 1024 * 1024 ? '会话超过 100 MB，同步可能较慢' : '';
-      clearAutoDirty();
+      finishAutoDirty(targetId, runtimeRepairBytes > 0);
       return { status: runtimeRepairBytes ? 'copied' : 'skipped', sourceId: src.id, targetId, branched: false, failedFiles: 0, warning, sourceBytes: left.totalBytes, totalBytes: left.totalBytes, copiedBytes: runtimeRepairBytes };
     }
     let right = await sessionSync.readSnapshotAsync(PROFILE.dataRoot, targetId, aliases, syncCache);
@@ -5409,7 +5429,7 @@ async function copySessionRecord(src, targetUid, options = {}) {
         sourceBytes: left.totalBytes, totalBytes,
       });
     });
-    clearAutoDirty();
+    finishAutoDirty(targetId, changed);
     return { status: changed ? 'copied' : 'skipped', sourceId: src.id, targetId, branched: branched && changed, failedFiles: 0, warning, sourceBytes: left.totalBytes, totalBytes, copiedBytes };
   };
   // One lineage lock also serializes manual copy and reverse-direction updates.
@@ -5461,6 +5481,9 @@ async function buildAutoCopyPlan(sourceUid, targetUid, requestedSessionIds = [])
     if (typeof dirtyIndex.get !== 'function' || typeof clearSessionDirty !== 'function') return false;
     const marker = dirtyIndex.get(source, row.id);
     if (!marker) return false;
+    // This target is current, but other members may still need the synced
+    // content. Retain that eligibility while skipping this completed pair.
+    if (marker.event === 'sessionSynced') return true;
     // Markers written by the pre-1.2.139 lifecycle signature can survive a
     // reload even though both persisted revisions prove the mapping is clean.
     // Clear only that proven no-op; a changed source revision remains dirty.

@@ -12409,10 +12409,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var sessionDirtyUnsubscribe = null;
     var sessionDirtyRetryTimer = null;
     var sessionDirtyUid = '';
+    var sessionDirtyDisposed = false;
     api('/api/current').then(function (current) {
       sessionDirtyUid = String(current && current.uid || '').trim();
     }).catch(function () {});
-    var sessionDirtyTracker = createSessionDirtyTracker(function (payload) {
+    function sendSessionDirtyEvents(payload) {
+      if (sessionDirtyDisposed) return;
       var body = payload && Array.isArray(payload) ? { events: payload } : (payload || {});
       if (sessionDirtyUid) body.uid = sessionDirtyUid;
       api('/api/sessions/dirty', {
@@ -12420,7 +12422,39 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       }).catch(function () {});
-    });
+    }
+    var sessionDirtyTracker = createSessionDirtyTracker(sendSessionDirtyEvents);
+    // WorkBuddy 5.7.6 can expose an empty, silent sessionsResource. Keep the
+    // sidebar baseline separate so late resource snapshots cannot reset it.
+    var sessionDirtySidebarTracker = createSessionDirtyTracker(sendSessionDirtyEvents);
+    var sessionDirtySidebarSeen = Object.create(null);
+    var sessionDirtySidebarPrimed = false;
+    function pollSessionDirtySidebar() {
+      if (sessionDirtyDisposed || !WBS_COMPAT || typeof WBS_COMPAT.findConversationListRecords !== 'function') return;
+      var records;
+      try { records = WBS_COMPAT.findConversationListRecords(document); } catch (_) { return; }
+      if (!Array.isArray(records) || !records.length) return;
+      var updates = records.map(function (record) {
+        var value = record || {};
+        return {
+          id: String(value.id || value.sessionId || value.conversationId || '').trim(),
+          title: String(value.title || value.name || ''),
+          customTitle: String(value.customTitle || value.custom_title || ''),
+          updatedAt: Number(value.sortAt || value.updatedAt || value.updated_at || 0),
+        };
+      }).filter(function (update) { return !!update.id; });
+      if (!updates.length) return;
+      if (!sessionDirtySidebarPrimed) {
+        sessionDirtySidebarTracker.baseline(updates);
+        sessionDirtySidebarPrimed = true;
+      } else {
+        updates.forEach(function (update) {
+          update.event = sessionDirtySidebarSeen[update.id] ? 'sessionUpdated' : 'sessionCreated';
+          sessionDirtySidebarTracker.observe(update);
+        });
+      }
+      updates.forEach(function (update) { sessionDirtySidebarSeen[update.id] = true; });
+    }
     function sessionDirtyResourceRecords(resource) {
       if (!resource || typeof resource.list !== 'function') return null;
       try {
@@ -12448,11 +12482,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         sessionDirtyTracker.observe(update);
       });
       var snapshot = sessionDirtyResourceRecords(resource);
-      if (snapshot) snapshot.then(function (records) { sessionDirtyTracker.baseline(records); }).catch(function () {});
+      if (snapshot) snapshot.then(function (records) {
+        if (!sessionDirtyDisposed) sessionDirtyTracker.baseline(records);
+      }).catch(function () {});
       return true;
     }
     bindSessionDirtyMonitor();
+    pollSessionDirtySidebar();
+    var sessionDirtySidebarTimer = setInterval(pollSessionDirtySidebar, 5000);
     registerDisposer(function () {
+      sessionDirtyDisposed = true;
+      clearInterval(sessionDirtySidebarTimer);
+      sessionDirtySidebarTracker.destroy();
+      sessionDirtySidebarSeen = Object.create(null);
       if (sessionDirtyRetryTimer) { clearTimeout(sessionDirtyRetryTimer); sessionDirtyRetryTimer = null; }
       if (typeof sessionDirtyUnsubscribe === 'function') {
         try { sessionDirtyUnsubscribe(); } catch (_) {}
