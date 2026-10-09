@@ -1073,17 +1073,26 @@ test('robot button decorations remain visible alongside the eye states', () => {
   assert.match(script, /\.wbs-fab \.click \.button \.speak~\.speak\{display:none\}/);
 });
 
-test('robot button defaults to the window bottom-right and snaps right after free dragging', () => {
+test('robot button anchors to the conversation area bottom-right and snaps right after free dragging', () => {
   const script = read('inject.js');
-  assert.match(script, /FAB_POSITION_KEY = 'wbs-fab-bottom-v2-' \+ PROFILE_ID/);
-  assert.match(script, /FAB_LEGACY_POSITION_KEY = 'wbs-fab-bottom-' \+ PROFILE_ID/);
+  assert.match(script, /FAB_POSITION_KEY = 'wbs-fab-bottom-v3-' \+ PROFILE_ID/);
+  assert.match(script, /'wbs-fab-bottom-v2-' \+ PROFILE_ID/);
+  assert.match(script, /'wbs-fab-bottom-' \+ PROFILE_ID/);
   assert.match(script, /raw !== null && raw !== '' && isFinite\(value\)/);
-  assert.match(script, /localStorage\.removeItem\(FAB_LEGACY_POSITION_KEY\)/);
+  assert.match(script, /localStorage\.removeItem\(FAB_RETIRED_POSITION_KEYS\[i\]\)/);
+  // The anchor is the conversation area, not the window.
+  assert.match(script, /'\.teams-container\.is-mac \.conversation-shell'/);
+  assert.match(script, /function readFabAnchorNode\(\)/);
+  assert.match(script, /function fabAnchorOffsets\(\)/);
+  assert.match(script, /window\.innerWidth - rect\.right\) \+ FAB_EDGE_GAP/);
+  assert.match(script, /window\.innerHeight - rect\.bottom\) \+ FAB_EDGE_GAP/);
+  assert.match(script, /new ResizeObserver\(function \(\) \{ scheduleFabPos\(\); \}\)/);
+  assert.match(script, /ensureFabAnchorObserver\(\)/);
   assert.match(script, /setPointerCapture\(e\.pointerId\)/);
   assert.match(script, /FAB_DRAG_THRESHOLD = 6/);
   assert.match(script, /fabDrag\.startRight - deltaX/);
   assert.match(script, /fabDrag\.startBottom - deltaY/);
-  assert.match(script, /applyFabPosition\(fab, FAB_EDGE_GAP, bottom\)/);
+  assert.match(script, /applyFabPosition\(fab, fabAnchorOffsets\(\)\.right, bottom\)/);
   assert.match(script, /localStorage\.setItem\(FAB_POSITION_KEY/);
   assert.match(script, /touchAction = 'none'/);
   assert.match(script, /is-snapping/);

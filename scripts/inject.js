@@ -5257,32 +5257,74 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var fabSnapTimer = null;
     var FAB_DRAG_THRESHOLD = 6;
     var FAB_EDGE_GAP = 22;
-    // v2 deliberately ignores the pre-drag/anchor coordinates.  Those values
-    // could place the button at the top edge (where WorkBuddy's toolbar
-    // intercepts the hit), leaving a visible but unusable robot after upgrade.
-    var FAB_POSITION_KEY = 'wbs-fab-bottom-v2-' + PROFILE_ID;
-    var FAB_LEGACY_POSITION_KEY = 'wbs-fab-bottom-' + PROFILE_ID;
+    // The robot belongs to the conversation area, not to the window, so the
+    // anchor is that element's bottom-right corner. Anchoring to the component
+    // keeps the button beside the chat when the sidebar collapses, the window
+    // resizes, or a right-hand detail panel opens.
+    var FAB_ANCHOR_SELECTORS = [
+      '.teams-container.is-mac .conversation-shell',
+      '.conversation-shell',
+      '.conversation-shell__main',
+      '.teams-main-content',
+    ];
+    // v3 re-anchors the button to the conversation area. v2 stored a
+    // viewport-relative bottom offset, which parked the robot mid-screen
+    // (253px) even though it was asked to sit in the corner; that stale offset
+    // is dropped on purpose. The pre-drag v1 coordinates stay ignored for the
+    // reason recorded before: they could pin the robot under WorkBuddy's
+    // toolbar, leaving it visible but unusable after an upgrade.
+    var FAB_POSITION_KEY = 'wbs-fab-bottom-v3-' + PROFILE_ID;
+    var FAB_RETIRED_POSITION_KEYS = [
+      'wbs-fab-bottom-v2-' + PROFILE_ID,
+      'wbs-fab-bottom-' + PROFILE_ID,
+    ];
 
     function readFabBottom() {
       try {
         var raw = localStorage.getItem(FAB_POSITION_KEY);
         var value = Number(raw);
         if (raw !== null && raw !== '' && isFinite(value)) return value;
-        // Remove the old coordinate so a later downgrade/reinjection cannot
-        // immediately restore the broken top-edge position.
-        localStorage.removeItem(FAB_LEGACY_POSITION_KEY);
+        for (var i = 0; i < FAB_RETIRED_POSITION_KEYS.length; i++) {
+          // Drop retired coordinates so a downgrade/reinjection cannot restore
+          // a position whose reference point the anchor no longer means.
+          localStorage.removeItem(FAB_RETIRED_POSITION_KEYS[i]);
+        }
         return null;
       } catch (_) { return null; }
     }
 
+    function readFabAnchorNode() {
+      for (var i = 0; i < FAB_ANCHOR_SELECTORS.length; i++) {
+        var node = document.querySelector(FAB_ANCHOR_SELECTORS[i]);
+        if (!node) continue;
+        var rect = node.getBoundingClientRect();
+        if (rect && rect.width > 0 && rect.height > 0) return node;
+      }
+      return null;
+    }
+
+    // Distance from the viewport edges to the anchor's bottom-right corner plus
+    // the visual gap. Without a usable anchor the viewport corner is the floor.
+    function fabAnchorOffsets() {
+      var node = readFabAnchorNode();
+      if (!node) return { right: FAB_EDGE_GAP, bottom: FAB_EDGE_GAP };
+      var rect = node.getBoundingClientRect();
+      return {
+        right: Math.max(FAB_EDGE_GAP, Math.round(window.innerWidth - rect.right) + FAB_EDGE_GAP),
+        bottom: Math.max(FAB_EDGE_GAP, Math.round(window.innerHeight - rect.bottom) + FAB_EDGE_GAP),
+      };
+    }
+
     function clampFabBottom(bottom, height) {
-      var max = Math.max(FAB_EDGE_GAP, window.innerHeight - height - FAB_EDGE_GAP);
-      return Math.max(FAB_EDGE_GAP, Math.min(max, Number(bottom) || FAB_EDGE_GAP));
+      var floor = fabAnchorOffsets().bottom;
+      var max = Math.max(floor, window.innerHeight - height - FAB_EDGE_GAP);
+      return Math.max(floor, Math.min(max, Number(bottom) || floor));
     }
 
     function clampFabRight(right, width) {
-      var max = Math.max(FAB_EDGE_GAP, window.innerWidth - width - FAB_EDGE_GAP);
-      return Math.max(FAB_EDGE_GAP, Math.min(max, Number(right) || FAB_EDGE_GAP));
+      var floor = fabAnchorOffsets().right;
+      var max = Math.max(floor, window.innerWidth - width - FAB_EDGE_GAP);
+      return Math.max(floor, Math.min(max, Number(right) || floor));
     }
 
     function applyFabPosition(fab, right, bottom) {
@@ -5306,13 +5348,38 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         positionFab();
       });
     }
+    // The conversation area is rebuilt and resized by WorkBuddy (session
+    // switches, detail panel motion), so re-resolve the node and watch its box
+    // instead of trusting the element captured at injection time.
+    var fabAnchorObserver = null;
+    var fabAnchorObserverNode = null;
+    function ensureFabAnchorObserver() {
+      if (typeof ResizeObserver !== 'function') return;
+      var node = readFabAnchorNode();
+      if (node && node === fabAnchorObserverNode && node.isConnected) return;
+      if (fabAnchorObserver) fabAnchorObserver.disconnect();
+      fabAnchorObserverNode = node;
+      if (!node) return;
+      if (!fabAnchorObserver) {
+        fabAnchorObserver = new ResizeObserver(function () { scheduleFabPos(); });
+      }
+      fabAnchorObserver.observe(node);
+    }
+    registerDisposer(function () {
+      if (!fabAnchorObserver) return;
+      fabAnchorObserver.disconnect();
+      fabAnchorObserver = null;
+      fabAnchorObserverNode = null;
+    });
     function positionFab() {
       var fab = root.querySelector('.wbs-fab');
       if (!fab) return;
+      ensureFabAnchorObserver();
       if (fab.classList.contains('hidden')) return; // 面板打开时保持隐藏
       if (fabDrag) return;
+      var anchor = fabAnchorOffsets();
       var saved = readFabBottom();
-      applyFabPosition(fab, FAB_EDGE_GAP, saved == null ? FAB_EDGE_GAP : saved);
+      applyFabPosition(fab, anchor.right, saved == null ? anchor.bottom : saved);
     }
     setBuildTimeout(scheduleFabPos, 600); // 首屏定位
 
@@ -11551,7 +11618,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
         fab.classList.remove('is-dragging');
         fab.classList.add('is-snapping');
-        applyFabPosition(fab, FAB_EDGE_GAP, bottom);
+        applyFabPosition(fab, fabAnchorOffsets().right, bottom);
         syncAutomationStopPosition();
         try { localStorage.setItem(FAB_POSITION_KEY, String(Math.round(bottom))); } catch (_) {}
         fabDrag = null;
