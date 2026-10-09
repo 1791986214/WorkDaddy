@@ -187,8 +187,16 @@ test('account switching carries the active conversation and opens its copied tar
   assert.match(inject, /function acSwitchConversationId()/);
   assert.match(inject, /openCopiedSession/);
   assert.match(compat, /function findConversationActivationApi\(doc, options\)/);
-  assert.match(compat, /setCurrentConversation/);
-  assert.match(compat, /sdkNavigateKind/);
+  // Only real navigation sources may drive activation: the conversation-list
+  // React handler (both the WorkBuddy >= 5.7 and the <= 5.6 marker groups) or
+  // the session-navigation SDK. conversations.setCurrentConversation merely
+  // reports the active session to the main process, so it must never be used as
+  // an activation path.
+  assert.doesNotMatch(compat, /conversations\.setCurrentConversation/);
+  assert.match(compat, /CONVERSATION_NAVIGATION_MARKER_GROUPS/);
+  assert.match(compat, /\['preserveListView', 'conversationEngineRouteTarget', 'loadSession'\]/);
+  assert.match(compat, /\['dismissHoverPeek', 'syncTaskRouteFromClick'\]/);
+  assert.match(compat, /conversations\.navigateToSession/);
   assert.match(compat, /adapter\.emit\('jump-to-conversation'/);
   assert.match(inject, /activationApi\.hasSession\(id\)/);
   assert.match(inject, /job\.openSessionId\) setBuildTimeout\(function \(\) \{ openCopiedSession\(job\.openSessionId\); \}, 1000\)/);
