@@ -107,6 +107,27 @@ test('account settings persist hover visibility for note and growth popovers', (
   assert.match(source, /accountNoteHoverEnabled\(\) && button && !button\.contains\(event\.relatedTarget\)/);
   assert.match(source, /!growthPlanHoverEnabled\(\) \|\| !ring \|\| ring === activeRing/);
 });
+test('growth plan popover has an accessible close button and glass note save contrast', () => {
+  const growth = section('function dailyProgressPopoverHtml(', 'function updateDailyProgressCells()');
+  assert.match(growth, /data-wbs-daily-close/);
+  assert.match(growth, /aria-label="关闭成长计划"/);
+  const daily = section('function setupDailyProgressPopover()', 'function setupModelRateLimitPopover()');
+  assert.match(daily, /closest\('\[data-wbs-daily-close\]'\)/);
+  assert.match(source, /html\[data-wbs-theme-id="nebula"\] \.wbs-account-note-footer \.primary\{background:rgba\(255,255,255,\.9\) !important/);
+});
+test('account settings modal uses grouped controls that wrap on narrow windows', () => {
+  assert.match(source, /\.wbs-account-order-modes\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(source, /\.wbs-account-settings-toggle\{display:flex;align-items:center;justify-content:space-between/);
+  assert.match(source, /@media\(max-width:420px\)\{\.wbs-account-order-modal\{width:100%/);
+});
+test('glass composer triggers receive an inline transparent background after teams remounts', () => {
+  assert.match(source, /function syncGlassComposerTriggerBackgrounds\(\)/);
+  assert.match(source, /node\.style\.setProperty\('background', 'transparent', 'important'\)/);
+  assert.match(source, /node\.style\.setProperty\('background-color', 'transparent', 'important'\)/);
+  assert.match(source, /\.cr-context-usage-tooltip-trigger/);
+  assert.match(source, /glassThemeObserver\.observe\(document\.documentElement/);
+  assert.match(source, /\.wbs-account-note-footer \.primary:disabled\{background:rgba\(255,255,255,\.78\) !important[^}]*color:#34343c !important/);
+});
 test('avatar presets retain legacy custom uploads and are safe before official conversion completes', () => {
   const context = {};
   vm.runInNewContext(section('  function resolveAvatarChoice(', '  function checkinHtml('), context);

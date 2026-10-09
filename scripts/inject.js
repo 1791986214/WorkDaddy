@@ -1503,7 +1503,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '派出前当前 Buddy 查询失败': 'Could not load current Buddy before departure', '旅行地点查询失败': 'Could not load travel destinations', 'Buddy 派出失败': 'Buddy departure failed',
     '账号 {account}：Buddy 已派出旅行': 'Account {account}: Buddy departed', '账号 {account}：暂无可用旅行地点': 'Account {account}: No travel destinations available', '账号 {account}：尚未选择 Buddy，暂不派出': 'Account {account}: No Buddy selected; skipping departure',
     '账号 {account}：今天已经处理过旅行，跳过': 'Account {account}: Travel already handled today; skipping', '账号 {account}：旅行处理失败：{reason}': 'Account {account}: Travel failed: {reason}', '部分账号 Buddy 操作失败，请查看运行记录': 'Some Buddy actions failed. Check the run log.',
-    ' 分支到新会话': ' Start a new conversation here', '账号设置': 'Account settings', '排序方式': 'Sort by', '积分不足时的账号切换建议': 'Suggest switching accounts when credits run low',
+    ' 分支到新会话': ' Start a new conversation here', '账号设置': 'Account settings', '悬浮窗口': 'Hover popovers', '排序方式': 'Sort by', '积分不足时的账号切换建议': 'Suggest switching accounts when credits run low',
     '查询失败，请重新选择时间重试': 'Query failed. Select a time range to retry.',
     '查询已中断，请重新选择时间重试': 'Query interrupted. Select a time range to retry.',
     '无法读取查询进度，请重新选择时间重试': 'Could not read progress. Select a time range to retry.',
@@ -5167,12 +5167,37 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (messageNavigation) messageNavigation.sync();
       scheduleForkButtons();
       scheduleFabPos();
+      if (typeof syncGlassComposerTriggerBackgrounds === 'function') syncGlassComposerTriggerBackgrounds();
       watchRow();
       syncStash(); // 页面切换（欢迎页↔聊天页）后立即重算暂存按钮显隐
       if (!findActionRow()) return;
       watchSend();
       syncQueueTags();
       wrapQueueReorder();
+    }
+    // 官方新版 teams 工具条会把背景直接写在 tooltip 触发器的元素样式上，
+    // 主题 CSS 即使带 !important 也可能被 React 重渲染后的内联值盖回去。
+    // 毛玻璃主题下按实际节点写入内联透明背景，并在节点重建时重新应用。
+    function syncGlassComposerTriggerBackgrounds() {
+      var html = document.documentElement;
+      var glass = html && html.getAttribute('data-wbs-theme-id') === 'nebula';
+      var selector = '.teams-container .cr-input-toolbar__right > span.cr-voice-trigger-tooltip,' +
+        '.teams-container .cr-input-toolbar__right > span.cr-context-usage-tooltip-trigger,' +
+        '.teams-container .cr-input-toolbar__right > span.cr-enhance-button-tooltip';
+      document.querySelectorAll(selector).forEach(function (node) {
+        if (glass) {
+          node.style.setProperty('background', 'transparent', 'important');
+          node.style.setProperty('background-color', 'transparent', 'important');
+          node.style.setProperty('box-shadow', 'none', 'important');
+          node.setAttribute('data-wbs-glass-trigger-patched', '1');
+        }
+        else if (node.getAttribute('data-wbs-glass-trigger-patched') === '1') {
+          node.style.removeProperty('background');
+          node.style.removeProperty('background-color');
+          node.style.removeProperty('box-shadow');
+          node.removeAttribute('data-wbs-glass-trigger-patched');
+        }
+      });
     }
     function onInputSync() { if (!alive) return; guardSessionChange(); scheduleFabPos(); syncStash(); syncQueueTags(); wrapQueueReorder(); }
     syncThemeAuditRoot();
@@ -5215,7 +5240,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     if (typeof MutationObserver !== 'undefined') {
       bodyObserver = new MutationObserver(scheduleDomChange);
       bodyObserver.observe(document.body, { childList: true, subtree: true });
+      var glassThemeObserver = new MutationObserver(syncGlassComposerTriggerBackgrounds);
+      glassThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-wbs-theme-id'] });
+      registerDisposer(function () { glassThemeObserver.disconnect(); });
     }
+    syncGlassComposerTriggerBackgrounds();
     syncStash(); // 初始检查
     scheduleForkButtons();
     setBuildTimeout(wrapQueueReorder, 800);
@@ -7127,6 +7156,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       listen(popup, 'mouseleave', function () { dailyPopoverHovered = false; deferHide(); });
       listen(popup, 'pointerdown', function (event) { event.stopPropagation(); });
       listen(popup, 'click', function (event) {
+        var closeButton = event.target && event.target.closest ? event.target.closest('[data-wbs-daily-close]') : null;
+        if (closeButton && popup.contains(closeButton) && (!closeButton.hasAttribute || closeButton.hasAttribute('data-wbs-daily-close'))) {
+          event.preventDefault();
+          event.stopPropagation();
+          hide(true);
+          return;
+        }
         var button = event.target && event.target.closest ? event.target.closest('[data-wbs-growth-official],[data-wbs-claimed-toggle]') : null;
         if (!button || !popup.contains(button)) return;
         event.preventDefault();
@@ -11742,6 +11778,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var themeSelectionSerial = 0;
     function syncThemeSelection(id) {
       currentThemeId = ALLOWED_THEMES.indexOf(id) >= 0 ? id : 'default';
+      if (typeof syncGlassComposerTriggerBackgrounds === 'function') syncGlassComposerTriggerBackgrounds();
       if (themePane) themePane.querySelectorAll('#wbs-theme-seg input[name="wbs-theme"]').forEach(function (input) {
         input.checked = input.value === currentThemeId;
         input.closest('.wbs-theme-opt').classList.toggle('active', input.checked);
@@ -15402,7 +15439,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       var pad = function (value) { return String(value).padStart(2, '0'); };
       var refreshedAt = time && !isNaN(time.getTime()) ? pad(time.getHours()) + ':' + pad(time.getMinutes()) + ':' + pad(time.getSeconds()) : '尚未刷新';
       var spinner = refreshing ? '<i class="wbs-daily-refresh-spinner" aria-hidden="true"></i>' : '';
-      var head = '<div class="wbs-daily-popover-head"><strong>成长计划</strong><span class="wbs-daily-refresh-time">' + spinner + (time ? '刷新于 ' : '') + refreshedAt + '</span></div>';
+      var head = '<div class="wbs-daily-popover-head"><strong>成长计划</strong><span class="wbs-daily-popover-head-actions"><span class="wbs-daily-refresh-time">' + spinner + (time ? '刷新于 ' : '') + refreshedAt + '</span><button type="button" class="wbs-daily-popover-close" data-wbs-daily-close title="关闭成长计划" aria-label="关闭成长计划"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3 3 13"/></svg></button></span></div>';
       if (!progress) return head + '<div class="wbs-daily-popover-empty">正在刷新成长计划与 Buddy 旅行状态…</div>';
       if (progress.status !== 'ready') return head + '<div class="wbs-daily-popover-empty">刷新失败，移开后再次悬浮即可重试</div>';
       var growth = progress.growth || {};
@@ -17194,6 +17231,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '.wbs-status-popover{position:fixed;z-index:2147483647;width:306px;box-sizing:border-box;padding:12px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.14));border-radius:11px;background:color-mix(in srgb,var(--wb-bg-popover,#fff) 96%,transparent);color:var(--wb-color-text-primary,#1f1f1f);box-shadow:0 16px 42px rgba(20,24,32,.16),inset 0 1px 0 rgba(255,255,255,.5);backdrop-filter:blur(20px) saturate(1.08);-webkit-backdrop-filter:blur(20px) saturate(1.08);font:12px/1.45 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto}.wbs-status-popover.is-daily{width:620px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}',
     '.wbs-status-popover.is-daily::-webkit-scrollbar,.wbs-growth-task-list::-webkit-scrollbar{display:none}',
     '.wbs-status-popover.is-passive{pointer-events:none}.wbs-status-popover.is-credit{height:auto;min-height:0;max-height:calc(100vh - 16px);overflow:auto;overflow-wrap:anywhere}.wbs-status-popover[hidden]{display:none!important}.wbs-daily-popover-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.wbs-daily-popover-head strong{font-size:13px;font-weight:700;white-space:nowrap}.wbs-daily-popover-head span{color:var(--wb-icon-tertiary,#7c818b);font-size:10px;font-variant-numeric:tabular-nums}.wbs-daily-refresh-time{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}',
+    '.wbs-daily-popover-head-actions{display:inline-flex;min-width:0;align-items:center;justify-content:flex-end;gap:6px}.wbs-daily-popover-close{display:inline-flex;width:22px;height:22px;flex:0 0 22px;align-items:center;justify-content:center;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--wb-icon-secondary,var(--wb-color-text-secondary,#666));cursor:pointer}.wbs-daily-popover-close:hover{background:var(--wb-bg-hover,rgba(127,127,127,.12));color:var(--wb-color-text-primary,#1f1f1f)}.wbs-daily-popover-close:focus-visible{outline:2px solid var(--wb-accent-blue,var(--wb-color-text-primary,#1f1f1f));outline-offset:1px}.wbs-daily-popover-close svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round}',
     '.wbs-daily-refresh-spinner{width:9px;height:9px;box-sizing:border-box;border:1.5px solid color-mix(in srgb,var(--wbs-ring-growth) 25%,transparent);border-top-color:var(--wbs-ring-growth);border-radius:50%;animation:wbs-daily-spin .72s linear infinite}@keyframes wbs-daily-spin{to{transform:rotate(360deg)}}',
     '.wbs-daily-detail{display:grid;grid-template-columns:8px 72px minmax(0,1fr);align-items:center;gap:7px;min-height:31px;margin-top:5px;padding:0 9px;border:1px solid var(--wb-border-subtle,rgba(20,24,32,.1));border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#f6f7f8) 72%,transparent)}',
     '.wbs-daily-detail i,.wbs-credit-tip-value i{display:block;width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 0 2px color-mix(in srgb,currentColor 17%,transparent)}.wbs-daily-detail i.growth{color:var(--wbs-ring-growth)}.wbs-daily-detail i.cat{color:var(--wbs-ring-cat)}.wbs-daily-detail i.credit{color:var(--wbs-tip-credit)}.wbs-daily-detail>span{color:var(--wb-color-text-secondary,#5f6368);white-space:nowrap}.wbs-daily-detail b{min-width:0;text-align:right;font-size:11px;font-weight:650;overflow-wrap:anywhere}.wbs-daily-detail.cat-row b{white-space:nowrap;font-variant-numeric:tabular-nums}.wbs-daily-cat-value{display:flex;min-width:0;align-items:center;justify-content:flex-end;gap:8px}.wbs-travel-claim{flex:0 0 auto}',
@@ -17833,14 +17871,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     /* 账号列表容器 + 退出按钮 */
     '.wbs-acct-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px 9px;border-bottom:1px solid var(--wb-border-subtle,#f0f0f0);background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 25%,transparent);flex-shrink:0}',
     '#wbs-account-order-mask{pointer-events:auto;overscroll-behavior:contain}',
-    '.wbs-account-order-modal{box-sizing:border-box;width:360px;max-width:calc(100% - 28px);max-height:calc(100% - 28px);display:flex;flex-direction:column;overflow:auto}',
-    '.wbs-account-settings-section{font-size:11px;font-weight:600;color:var(--wb-color-text-secondary,#666);margin:8px 0 6px}',
-    '.wbs-account-settings-toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0 6px;padding:10px 0;border-top:1px solid var(--wb-border-subtle,#eee);border-bottom:1px solid var(--wb-border-subtle,#eee);font-size:12px;cursor:pointer}.wbs-account-settings-toggle>span:first-child{min-width:0;line-height:1.4}',
-    '.wbs-account-order-modes{display:flex;flex-wrap:wrap;gap:10px 16px;font-size:12px}.wbs-account-order-modes label{display:flex;align-items:center;gap:5px;cursor:pointer}.wbs-account-order-modes input{margin:0;accent-color:var(--wb-button-primary-bg)}',
+    '.wbs-account-order-modal{box-sizing:border-box;width:380px;max-width:calc(100% - 28px);max-height:calc(100% - 28px);display:flex;flex-direction:column;overflow:auto;gap:0}.wbs-account-order-modal>.wbs-modal-title{margin-bottom:3px}',
+    '.wbs-account-settings-section{margin:14px 0 7px;padding-bottom:5px;border-bottom:1px solid var(--wb-border-subtle,#eee);font-size:11px;font-weight:650;line-height:1.35;color:var(--wb-color-text-secondary,#666)}.wbs-account-order-modal>.wbs-modal-title+.wbs-account-settings-section{margin-top:2px}',
+    '.wbs-account-settings-toggle{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:38px;margin:0 0 6px;padding:7px 9px;border:1px solid var(--wb-border-subtle,#eee);border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 42%,transparent);font-size:12px;cursor:pointer}.wbs-account-settings-toggle>span:first-child{min-width:0;line-height:1.45;overflow-wrap:anywhere}.wbs-account-settings-toggle .wbs-switch{flex:0 0 auto}',
+    '.wbs-account-order-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;font-size:12px}.wbs-account-order-modes label{display:flex;min-width:0;align-items:center;gap:7px;padding:8px 9px;border:1px solid var(--wb-border-subtle,#eee);border-radius:8px;background:color-mix(in srgb,var(--wb-bg-secondary,#fff) 42%,transparent);cursor:pointer;line-height:1.35}.wbs-account-order-modes label:has(input:checked){border-color:var(--wb-button-primary-bg,#1f1f1f);background:color-mix(in srgb,var(--wb-button-primary-bg,#1f1f1f) 8%,transparent)}.wbs-account-order-modes input{margin:0;accent-color:var(--wb-button-primary-bg);flex:0 0 auto}',
 
-    '.wbs-account-order-list{margin-top:12px;max-height:min(280px,40vh);overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:5px}',
+    '.wbs-account-order-list{margin-top:9px;padding:1px;max-height:min(280px,40vh);overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:5px}',
     '.wbs-account-order-row{display:flex;align-items:center;gap:8px;min-height:34px;padding:3px 8px;border:1px solid var(--wb-border-subtle);border-radius:8px;background:var(--wb-bg-secondary);font-size:12px}.wbs-account-order-row>span{flex:1;min-width:0;overflow-wrap:anywhere}.wbs-account-order-row button{cursor:grab}.wbs-account-order-row.dragging{opacity:.45}.wbs-account-order-row.drop-target{border-color:var(--wb-accent-blue);background:var(--wb-bg-hover)}',
-    '.wbs-account-order-modal :is(button,input):focus-visible{outline:2px solid var(--wb-accent-blue);outline-offset:2px}.wbs-account-order-modal button:disabled{opacity:.5;cursor:default}',
+    '.wbs-account-order-modal>.wbs-modal-actions{margin-top:14px;padding-top:10px;border-top:1px solid var(--wb-border-subtle,#eee)}.wbs-account-order-modal :is(button,input):focus-visible{outline:2px solid var(--wb-accent-blue);outline-offset:2px}.wbs-account-order-modal button:disabled{opacity:.5;cursor:default}',
+    '@media(max-width:420px){.wbs-account-order-modal{width:100%;max-width:calc(100% - 20px)}.wbs-account-order-modes{grid-template-columns:1fr}}',
+    'html[data-wbs-theme-id="nebula"] .wbs-account-note-footer .primary{background:rgba(255,255,255,.9) !important;border-color:rgba(255,255,255,.9) !important;color:#11121a !important}.wbs-account-note-footer .primary:focus-visible{outline-color:var(--wb-color-text-primary,#1f1f1f)}html[data-wbs-theme-id="nebula"] .wbs-account-note-footer .primary:disabled{background:rgba(255,255,255,.78) !important;border-color:rgba(255,255,255,.78) !important;color:#34343c !important;opacity:1 !important}',
     '.wbs-initial-sync-modal{box-sizing:border-box;width:380px;max-width:calc(100% - 28px)}.wbs-initial-sync-copy{margin:-2px 0 12px;color:var(--wb-color-text-secondary,#666);font-size:11.5px;line-height:1.6;overflow-wrap:anywhere}.wbs-initial-sync-toggle{margin:0 0 10px}.wbs-initial-sync-error{min-height:17px;margin:0 0 2px}.wbs-initial-sync-modal .wbs-modal-actions{justify-content:flex-end}.wbs-initial-sync-modal .wbs-modal-ok{min-width:66px}',
     '.wbs-credit-summary-popover{position:fixed;z-index:2147483647;box-sizing:border-box;width:300px;max-width:calc(100vw - 16px);padding:12px;background:var(--wb-bg-popover,var(--wb-bg-primary));color:var(--wb-color-text-primary);border:1px solid var(--wb-border-default);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);font:12px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:transparent transparent;pointer-events:auto}',
     '.wbs-credit-summary-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.wbs-credit-summary-head strong{font-size:13px}.wbs-credit-summary-head span,.wbs-credit-summary-foot{font-size:10px;color:var(--wb-color-text-secondary)}',
