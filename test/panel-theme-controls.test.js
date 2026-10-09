@@ -145,6 +145,7 @@ test('growth plan popover has an accessible close button and glass note save con
 test('account settings modal uses grouped controls that wrap on narrow windows', () => {
   assert.match(source, /\.wbs-account-order-modes\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(source, /\.wbs-account-settings-toggle\{display:flex;align-items:center;justify-content:space-between/);
+  assert.match(source, /\.wbs-account-order-modal \[data-fixed-order\]\+\.wbs-account-settings-toggle\{margin-top:14px\}/);
   assert.match(source, /@media\(max-width:420px\)\{\.wbs-account-order-modal\{width:100%/);
 });
 test('glass composer triggers receive an inline transparent background after teams remounts', () => {
