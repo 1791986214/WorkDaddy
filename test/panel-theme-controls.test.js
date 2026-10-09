@@ -68,7 +68,7 @@ test('account order is centered in the panel and always shows names without numb
 test('account switching advice defaults on but keeps explicit opt-out', () => {
   const fragment = section('    var rotationReminderKey = ', '    // 账号 pane 初始化');
   const settings = new Map();
-  const context = { PROFILE_ID: 'workbuddy-cn', localStorage: {
+  const context = { PROFILE_ID: 'workbuddy-cn', root: { classList: { toggle() {} } }, localStorage: {
     getItem: key => settings.get(key) ?? null,
   } };
   vm.runInNewContext(fragment, context);
@@ -86,7 +86,7 @@ test('account settings persist hover visibility for note and growth popovers', (
   assert.match(fragment, /function accountNoteHoverEnabled\(\)[\s\S]*localStorage\.getItem\(WBS_ACCOUNT_NOTE_HOVER_KEY\) !== '0'/);
   assert.match(fragment, /function growthPlanHoverEnabled\(\)[\s\S]*localStorage\.getItem\(WBS_GROWTH_PLAN_HOVER_KEY\) !== '0'/);
   const settings = new Map();
-  const context = { PROFILE_ID: 'workbuddy-cn', WBS_ACCOUNT_NOTE_HOVER_KEY: 'workdaddy.account.noteHover.workbuddy-cn', WBS_GROWTH_PLAN_HOVER_KEY: 'workdaddy.account.growthPlanHover.workbuddy-cn', localStorage: {
+  const context = { PROFILE_ID: 'workbuddy-cn', WBS_ACCOUNT_NOTE_HOVER_KEY: 'workdaddy.account.noteHover.workbuddy-cn', WBS_GROWTH_PLAN_HOVER_KEY: 'workdaddy.account.growthPlanHover.workbuddy-cn', root: { classList: { toggle() {} } }, localStorage: {
     getItem: key => settings.get(key) ?? null,
   } };
   vm.runInNewContext(fragment, context);
@@ -106,6 +106,33 @@ test('account settings persist hover visibility for note and growth popovers', (
   assert.match(modal, /localStorage\.setItem\(WBS_GROWTH_PLAN_HOVER_KEY, growthHover \? '1' : '0'\)/);
   assert.match(source, /accountNoteHoverEnabled\(\) && button && !button\.contains\(event\.relatedTarget\)/);
   assert.match(source, /!growthPlanHoverEnabled\(\) \|\| !ring \|\| ring === activeRing/);
+
+  assert.match(fragment, /function applyAccountNoteHoverState\(\)/);
+  assert.match(fragment, /classList\.toggle\('wbs-acct-note-hover-off', !accountNoteHoverEnabled\(\)\)/);
+  assert.match(modal, /applyAccountNoteHoverState\(\)/);
+  assert.match(source, /\.wbs-root\.wbs-acct-note-hover-off \.wbs-account-name:hover:not\(:focus-visible\):not\(\[aria-expanded="true"\]\) \.wbs-account-name-edit\{opacity:0;pointer-events:none\}/);
+});
+
+test('disabling the hover preview removes the account name edit affordance from hover only', () => {
+  const fragment = section('    var rotationReminderKey = ', '    // 账号 pane 初始化');
+  const settings = new Map();
+  const classes = new Set();
+  const context = {
+    PROFILE_ID: 'workbuddy-cn',
+    WBS_ACCOUNT_NOTE_HOVER_KEY: 'workdaddy.account.noteHover.workbuddy-cn',
+    WBS_GROWTH_PLAN_HOVER_KEY: 'workdaddy.account.growthPlanHover.workbuddy-cn',
+    localStorage: { getItem: key => settings.get(key) ?? null },
+    root: { classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); } } },
+  };
+  vm.runInNewContext(fragment, context);
+  // Default is on, so hovering keeps revealing the edit affordance.
+  assert.equal(classes.has('wbs-acct-note-hover-off'), false);
+  settings.set('workdaddy.account.noteHover.workbuddy-cn', '0');
+  context.applyAccountNoteHoverState();
+  assert.equal(classes.has('wbs-acct-note-hover-off'), true);
+  settings.set('workdaddy.account.noteHover.workbuddy-cn', '1');
+  context.applyAccountNoteHoverState();
+  assert.equal(classes.has('wbs-acct-note-hover-off'), false);
 });
 test('growth plan popover has an accessible close button and glass note save contrast', () => {
   const growth = section('function dailyProgressPopoverHtml(', 'function updateDailyProgressCells()');
