@@ -472,8 +472,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         继续等待本轮会话回执，避免把已发送消息误报为失败。
 // 1.2.15：补充侧栏会话变化检测，保留多账号同步资格，避免旧会话漏同步及首个目标消费更新标记。
 // 1.2.16：首页弹窗清理任务跨页面重跑时复用任务级 toast，避免重复点击新建任务堆叠相同提示。
-const DAEMON_VERSION = '1.2.16';
-const DAEMON_BUILD_ID = 'release-1.2.16-20261008-session-sync-dirty-fanout-popup-toast-dedupe';
+// 1.2.17：模型限流记录在守护进程侧跨账号去重，避免同步会话的历史 429 重复归属。
+const DAEMON_VERSION = '1.2.17';
+const DAEMON_BUILD_ID = 'release-1.2.17-20261009-model-rate-limit-cross-account-dedupe';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -9845,9 +9846,13 @@ function handleApi(req, res) {
         if (!account) return json(res, 404, { ok: false, error: '账号不存在' });
         const reasonCode = body && body.reasonCode === null ? null : Number(body && body.reasonCode);
         if (reasonCode !== 6004) return json(res, 400, { ok: false, error: '仅记录模型限流 code 6004' });
+        const now = Date.now();
         const resetAt = body && body.resetAt === null ? null : Number(body && body.resetAt);
-        if (resetAt !== null && (!Number.isSafeInteger(resetAt) || resetAt < Date.now() - 86400000 || resetAt > Date.now() + 90 * 86400000)) {
+        if (resetAt !== null && (!Number.isSafeInteger(resetAt) || resetAt < now - 86400000 || resetAt > now + 90 * 86400000)) {
           return json(res, 400, { ok: false, error: '解封时间无效' });
+        }
+        if (resetAt !== null && await CREDIT_USAGE_STORE.hasModelRateLimitElsewhere({ uid, modelId, resetAt, now })) {
+          return json(res, 200, { ok: true, skipped: 'duplicate-across-accounts' });
         }
         await CREDIT_USAGE_STORE.saveModelRateLimit({
           uid, modelId,
