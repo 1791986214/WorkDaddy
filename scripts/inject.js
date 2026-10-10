@@ -1968,7 +1968,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '正在重启客户端…': 'Relaunching client…',
     '已发送重启指令，请等待客户端重新出现': 'Relaunch requested. Waiting for the client to come back.',
     '恢复失败：': 'Recovery failed: ', '请求失败：': 'Request failed: ',
-    '客户端未在运行，无需重启': 'Client is not running; no relaunch needed'
+    '客户端未在运行，无需重启': 'Client is not running; no relaunch needed',
+    // —— 第十六批：自动化「新建任务」指定工作区（daemon 侧校验/报错文案） ——
+    '工作区': 'Workspace', '(无)': '(none)',
   };
   function wbsSystemLanguage() {
     var value = String((navigator && (navigator.language || navigator.userLanguage)) || '').toLowerCase();
