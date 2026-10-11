@@ -10,6 +10,15 @@ async function replaceNativeSession(session) {
   await this.initialized;
   if (this.refreshInFlight || this.loginInProgress || this.logoutInProgress) throw new Error('登录状态正在更新，请稍后重试');
   if (session !== null && (!session || !session.account || !session.account.uid || !session.auth || typeof session.auth.accessToken !== 'string' || !session.auth.accessToken)) throw new Error('账号备份无效');
+  // Electron's safeStorage can become unavailable when the macOS keychain or
+  // Linux keyring is locked. Treat that as an unavailable native store before
+  // touching the current session: a failed write must never roll back an
+  // unknown (possibly encrypted) session by removing its storage entry.
+  if (this.encryptionService && typeof this.encryptionService.isEncryptionAvailable === 'function') {
+    let available;
+    try { available = await this.encryptionService.isEncryptionAvailable(); } catch (_) { available = false; }
+    if (available === false) throw new Error('CodeBuddy 系统安全存储不可用，请解锁系统钥匙串或密钥环后重启 CodeBuddy');
+  }
   const previous = this.currentSession;
   // Reserve the official guards before the first await. A refresh or logout
   // must not overwrite this transaction while encrypted storage is pending.
@@ -231,7 +240,15 @@ function createCodeBuddyNative({profile,WebSocketCtor}) {
     }
     const result=await send('Runtime.callFunctionOn',{objectId:kind==='sessions'?sessionService:service,functionDeclaration:fn.toString(),arguments:args.map(value=>({value})),awaitPromise:true,returnByValue:true});
     // Never include exception descriptions: official errors can embed auth data.
-    if(result.exceptionDetails) throw new Error('CodeBuddy 认证操作失败，原生服务未确认成功');
+    if(result.exceptionDetails) {
+      // Keep official exception text out of logs and UI: it can contain auth
+      // data. Surface only the known storage failure as actionable guidance.
+      const detail = String(result.exceptionDetails.text || result.exceptionDetails.exception?.description || '');
+      if (/safeStorage|Encryption is not available|Decryption is not available|系统安全存储不可用/i.test(detail)) {
+        throw new Error('CodeBuddy 系统安全存储不可用，请解锁系统钥匙串或密钥环后重启 CodeBuddy');
+      }
+      throw new Error('CodeBuddy 认证操作失败，原生服务未确认成功');
+    }
     return result.result?.value;
   }
   return {
@@ -239,6 +256,10 @@ function createCodeBuddyNative({profile,WebSocketCtor}) {
     sessionItems:()=>call(function(){return Array.from(this._sessions, ([id,value])=>({key:'session:'+id,value:JSON.stringify(value)}));},[],'sessions'),
     writeSessions:changes=>call(writeNativeSessions,[changes],'sessions'),
     read:()=>call(async function(){return (await this.getCurrentSessionAsync()) || null;}),
+    encryptionAvailable:()=>call(async function(){
+      if (typeof this.encryptionService?.isEncryptionAvailable !== 'function') return null;
+      return !!(await this.encryptionService.isEncryptionAvailable());
+    }),
     replace:session=>call(replaceNativeSession,[session]),
     // Fake logout preserves the backed-up token; official logout may revoke it.
     logout:async()=>{await call(replaceNativeSession,[null]);return true;},

@@ -476,9 +476,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.18：检测客户端更新后丢失 CDP，并提供安全退出后的一键恢复入口。
 // 1.2.18：自动化 session.create 可选 cwd（绝对路径）/ workspace（侧栏工作区名）指定新会话
 //         工作目录；工作区不存在或绑定校验不通过时拒绝发送，不退回默认目录。
-// 1.2.19：合并客户端调试恢复与工作区绑定自动化能力。
-const DAEMON_VERSION = '1.2.19';
-const DAEMON_BUILD_ID = 'release-1.2.19-20261011-client-recovery-session-workspace-cwd';
+// 1.2.20：CodeBuddy 原生安全存储不可用时保护已有加密会话，并给出钥匙串/密钥环修复提示。
+const DAEMON_VERSION = '1.2.20';
+const DAEMON_BUILD_ID = 'release-1.2.20-20261011-codebuddy-safe-storage-guard';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -1774,8 +1774,18 @@ function releaseDaemonLock() {
 
 let backupTimer = null;
 let nativeAuthSyncTail = Promise.resolve();
+const CODEBUDDY_NATIVE_STORAGE_UNAVAILABLE = 'CodeBuddy 系统安全存储不可用，请解锁系统钥匙串或密钥环后重启 CodeBuddy';
+async function assertCodeBuddyNativeStorageAvailable() {
+  if (!codeBuddyNative || typeof codeBuddyNative.encryptionAvailable !== 'function') return;
+  const available = await codeBuddyNative.encryptionAvailable();
+  if (available === false) throw new Error(CODEBUDDY_NATIVE_STORAGE_UNAVAILABLE);
+}
 function syncCodeBuddyAuth() {
   const work = nativeAuthSyncTail.catch(() => {}).then(async () => {
+    // A locked keychain/keyring makes the native service report no session
+    // even when encrypted credentials are still present. Do not delete the
+    // last synced account file or treat the client as logged out in that case.
+    await assertCodeBuddyNativeStorageAvailable();
     const session = await codeBuddyNative.read();
     if (!session || !session.account || !session.auth) {
       if (fs.existsSync(AUTH_FILE)) fs.unlinkSync(AUTH_FILE);
