@@ -162,6 +162,7 @@ const plat = require('./platform.js');
 const { readWorkBuddyTarget } = require('./workbuddy-target.js');
 const { BINDING, createRendererApiBridge, rendererBridgeSource } = require('./renderer-api-bridge.js');
 const { createCodeBuddyNative } = require('./codebuddy-native.js');
+const { recoverNativeSession } = require('./codebuddy-native-recovery.js');
 const { createCodeBuddySessionStore } = require('./codebuddy-session-store.js');
 const { classifyTarget, looksLikeWbFamilyTarget, isTargetForProfile, selectPageTarget, selectIdeTargets } = require('./cdp-targets.js');
 const { createSessionDb, normalizeSessionIdBatch, parameterCount } = require('./session-db.js');
@@ -409,6 +410,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.24：账号轮换恢复真实积分段消耗检测，仅推荐缓存中到期时间最近的可用账号。
 // 1.2.25：首页弹窗任务补齐成长/活动入口，并按 renderer 页面身份修复重连后的 pageReady 触发。
 // 1.2.26：无效账号备份不再显示可点击的切换按钮，导入路径拒绝写入无效认证数据。
+// 1.2.27：CodeBuddy 原生会话丢失时，在安全存储恢复后自动从已确认备份恢复，退出登录保留显式抑制标记。
 // 1.2.43：自动化支持从 GitHub/Gitee 发现、缓存、去重并导入公开任务；签到不再作为内置任务安装。
 // 1.2.44：会话复制不再拆分重复血缘，缺失登记时认领已有副本；会话页显示可恢复进度，用量统计弹窗改版。
 // 1.2.45：自动化协议 V2 增加通用运行上下文、TTL/UUID/数值能力；账号页增加每日任务三环进度。
@@ -477,8 +479,8 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.18：自动化 session.create 可选 cwd（绝对路径）/ workspace（侧栏工作区名）指定新会话
 //         工作目录；工作区不存在或绑定校验不通过时拒绝发送，不退回默认目录。
 // 1.2.20：CodeBuddy 原生安全存储不可用时保护已有加密会话，并给出钥匙串/密钥环修复提示。
-const DAEMON_VERSION = '1.2.20';
-const DAEMON_BUILD_ID = 'release-1.2.20-20261011-codebuddy-safe-storage-guard';
+const DAEMON_VERSION = '1.2.27';
+const DAEMON_BUILD_ID = 'release-1.2.27-20261011-codebuddy-native-session-recovery';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -1774,22 +1776,71 @@ function releaseDaemonLock() {
 
 let backupTimer = null;
 let nativeAuthSyncTail = Promise.resolve();
-const CODEBUDDY_NATIVE_STORAGE_UNAVAILABLE = 'CodeBuddy 系统安全存储不可用，请解锁系统钥匙串或密钥环后重启 CodeBuddy';
-async function assertCodeBuddyNativeStorageAvailable() {
-  if (!codeBuddyNative || typeof codeBuddyNative.encryptionAvailable !== 'function') return;
-  const available = await codeBuddyNative.encryptionAvailable();
-  if (available === false) throw new Error(CODEBUDDY_NATIVE_STORAGE_UNAVAILABLE);
+const CODEBUDDY_NATIVE_STATE_FILE = path.join(DATA_DIR, 'codebuddy-native-state.json');
+function readCodeBuddyNativeState() {
+  if (!codeBuddyNative) return null;
+  try {
+    const state = JSON.parse(fs.readFileSync(CODEBUDDY_NATIVE_STATE_FILE, 'utf8'));
+    if (!state || typeof state !== 'object' || Array.isArray(state)) return null;
+    return {
+      uid: typeof state.uid === 'string' ? state.uid : '',
+      explicitLogout: state.explicitLogout === true,
+    };
+  } catch (_) { return null; }
+}
+function writeCodeBuddyNativeState(uid, explicitLogout = false) {
+  if (!codeBuddyNative) return;
+  try {
+    fs.mkdirSync(path.dirname(CODEBUDDY_NATIVE_STATE_FILE), { recursive: true, mode: 0o700 });
+    const temp = `${CODEBUDDY_NATIVE_STATE_FILE}.tmp.${process.pid}`;
+    fs.writeFileSync(temp, JSON.stringify({
+      uid: typeof uid === 'string' ? uid : '',
+      explicitLogout: explicitLogout === true,
+      updatedAt: Date.now(),
+    }) + '\n', { mode: 0o600 });
+    fs.renameSync(temp, CODEBUDDY_NATIVE_STATE_FILE);
+    try { fs.chmodSync(CODEBUDDY_NATIVE_STATE_FILE, 0o600); } catch (_) {}
+  } catch (_) {}
+}
+function readCodeBuddyBackupSession(uid) {
+  const file = accountBackupFile(uid);
+  if (!fs.existsSync(file)) throw new Error('账号备份不存在');
+  let session;
+  try { session = wdCompatDecryptAuthJson(JSON.parse(fs.readFileSync(file, 'utf8'))); }
+  catch (_) { throw new Error('账号备份无效'); }
+  if (!parseAuthJson(session, { strict: true }) || String(session.account?.uid || '') !== String(uid)) {
+    throw new Error('账号备份无效或不属于当前地区');
+  }
+  if (!wdCompatAuthToken(session.auth)) throw new Error('账号备份中无可用 accessToken');
+  return session;
+}
+async function recoverCodeBuddyNativeSession() {
+  if (!codeBuddyNative) return null;
+  const recovered = await recoverNativeSession({
+    native: codeBuddyNative,
+    accounts: listAccounts(DATA_DIR),
+    state: readCodeBuddyNativeState(),
+    primaryUid: primaryAccountStore.get(),
+    readSession: readCodeBuddyBackupSession,
+  });
+  if (!recovered) return null;
+  writeCodeBuddyNativeState(recovered.uid, false);
+  log(`[sync] CodeBuddy 原生登录态已自动恢复 uid=${recovered.uid}`);
+  return recovered.session;
 }
 function syncCodeBuddyAuth() {
   const work = nativeAuthSyncTail.catch(() => {}).then(async () => {
-    // A locked keychain/keyring makes the native service report no session
-    // even when encrypted credentials are still present. Do not delete the
-    // last synced account file or treat the client as logged out in that case.
-    await assertCodeBuddyNativeStorageAvailable();
-    const session = await codeBuddyNative.read();
+    let session = await codeBuddyNative.read();
     if (!session || !session.account || !session.auth) {
-      if (fs.existsSync(AUTH_FILE)) fs.unlinkSync(AUTH_FILE);
-      return null;
+      // A previous 1.2.12 daemon could delete the native-current file after a
+      // transient native read failure. Restore the last confirmed account (or
+      // the selected primary/newest valid backup) through CodeBuddy's official
+      // service instead of asking the user to log in again.
+      session = await recoverCodeBuddyNativeSession();
+      if (!session) {
+        if (fs.existsSync(AUTH_FILE)) fs.unlinkSync(AUTH_FILE);
+        return null;
+      }
     }
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(session.account.uid || ''))) throw new Error('原生账号标识无效');
     const content = JSON.stringify(session);
@@ -1801,6 +1852,7 @@ function syncCodeBuddyAuth() {
       fs.renameSync(temp, AUTH_FILE);
       fs.chmodSync(AUTH_FILE, 0o600);
     }
+    writeCodeBuddyNativeState(String(session.account.uid), false);
     return session;
   });
   nativeAuthSyncTail = work;
@@ -9897,7 +9949,11 @@ function handleApi(req, res) {
     if (codeBuddyNative) return (async () => {
       await syncCodeBuddyAuth();
       if (fs.existsSync(AUTH_FILE)) backupCurrent(DATA_DIR, log);
+      // Keep an explicit user logout from being mistaken for the 1.2.12
+      // native-session loss that the automatic recovery path repairs.
+      const beforeLogout = currentAccount();
       if (!await codeBuddyNative.logout()) throw new Error('CodeBuddy 未确认退出');
+      writeCodeBuddyNativeState(beforeLogout && beforeLogout.uid || '', true);
       await syncCodeBuddyAuth();
       return json(res, 200, {ok:true,quit:false,relaunched:false});
     })().catch(error => json(res, 500, {ok:false,error:error.message}));

@@ -39,10 +39,15 @@ test('CodeBuddy account switching explains an unavailable imported WorkBuddy cre
   assert.match(source, /账号备份中的加密凭据无法解密，请在 WorkBuddy 侧重新登录后再导出/);
   assert.match(source, /账号备份中无 accessToken/);
 });
-test('CodeBuddy keeps encrypted auth backups when native safeStorage is unavailable', () => {
-  assert.match(daemon, /assertCodeBuddyNativeStorageAvailable/);
-  assert.match(daemon, /系统安全存储不可用，请解锁系统钥匙串或密钥环后重启 CodeBuddy/);
-  assert.match(daemon, /await assertCodeBuddyNativeStorageAvailable\(\);\s+const session = await codeBuddyNative\.read\(\);/);
+test('CodeBuddy does not preflight-block native session recovery', () => {
+  assert.doesNotMatch(daemon, /assertCodeBuddyNativeStorageAvailable/);
+  assert.match(daemon, /let session = await codeBuddyNative\.read\(\);/);
+});
+test('CodeBuddy restores a lost native session from a validated backup', () => {
+  assert.match(daemon, /recoverCodeBuddyNativeSession/);
+  assert.match(daemon, /session = await recoverCodeBuddyNativeSession\(\)/);
+  assert.match(daemon, /writeCodeBuddyNativeState\(String\(session\.account\.uid\), false\)/);
+  assert.match(daemon, /writeCodeBuddyNativeState\(beforeLogout && beforeLogout\.uid \|\| '', true\)/);
 });
 test('CodeBuddy HTML compatibility keeps the official innerHTML sink unchanged', () => {
   const start = daemon.indexOf("  const trustedTypesBootstrap =");
