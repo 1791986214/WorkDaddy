@@ -198,6 +198,20 @@ test('Windows update opens the verified Setup visibly and keeps daemon alive', (
   assert.match(inject, /WBS_PLATFORM === 'win32'[\s\S]*showWindowsInstallerReady/);
 });
 
+test('Windows update deduplicates installer launches and keeps the opening button locked', () => {
+  const daemon = read('scripts/daemon.js');
+  const inject = read('scripts/inject.js');
+  const applyStart = daemon.indexOf('function applyUpdate()');
+  const applyEnd = daemon.indexOf('\n  const scriptPath = path.join(__dirname, \'apply-update.sh\')', applyStart);
+  const applyBlock = daemon.slice(applyStart, applyEnd);
+  assert.match(applyBlock, /updateApplyPromise/);
+  assert.match(applyBlock, /status === 'installer-opened'/);
+  assert.match(applyBlock, /alreadyOpen: true/);
+  assert.match(inject, /windowsInstallerOpening/);
+  assert.match(inject, /showWindowsInstallerReady\(prog, btn, card, timer, true\)/);
+  assert.match(inject, /安装程序已打开，请到任务栏选择安装窗口/);
+});
+
 test('Windows installer launch uses a visible detached process without shell arguments', async () => {
   let call = null;
   let unreferenced = false;
