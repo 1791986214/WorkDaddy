@@ -562,10 +562,12 @@ else
   # 产物保留与 Finder 布局版本一致的观感。默认取仓库内的布局源（scripts/assets/dmg-layout）。
   DSSTORE_SOURCE="${WORKDADDY_DSSTORE_SOURCE:-}"
   if [ -z "$DSSTORE_SOURCE" ]; then
-    DSSTORE_FALLBACK="scripts/assets/dmg-layout/workdaddy.DS_Store"
-    if [ "$PROFILE" = "workbuddy-ai" ]; then
-      DSSTORE_FALLBACK="scripts/assets/dmg-layout/workdaddy-ai.DS_Store"
-    fi
+    case "$PROFILE" in
+      workbuddy-ai) DSSTORE_FALLBACK="scripts/assets/dmg-layout/workdaddy-ai.DS_Store" ;;
+      codebuddy-cn) DSSTORE_FALLBACK="scripts/assets/dmg-layout/codedaddy-cn.DS_Store" ;;
+      codebuddy-intl) DSSTORE_FALLBACK="scripts/assets/dmg-layout/codedaddy.DS_Store" ;;
+      *) DSSTORE_FALLBACK="scripts/assets/dmg-layout/workdaddy.DS_Store" ;;
+    esac
     if [ -f "$DIR/$DSSTORE_FALLBACK" ]; then
       DSSTORE_SOURCE="$DIR/$DSSTORE_FALLBACK"
     fi

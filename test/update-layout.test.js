@@ -593,6 +593,24 @@ test('release scripts package all four independently branded profiles', () => {
   assert.match(installer, /\$lnkPath\s*=\s*Join-Path\s+\$desktopDir\s+\(\$productName\s+\+\s+'\.lnk'\)/);
 });
 
+test('macOS DMG fallback layouts pin every branded app beside Applications', () => {
+  const mac = read('build-mac-dmg.sh');
+  assert.match(mac, /codebuddy-cn\) DSSTORE_FALLBACK=.*codedaddy-cn\.DS_Store/);
+  assert.match(mac, /codebuddy-intl\) DSSTORE_FALLBACK=.*codedaddy\.DS_Store/);
+  const layouts = [
+    ['workdaddy.DS_Store', 'WorkDaddy.app'],
+    ['workdaddy-ai.DS_Store', 'WorkDaddy AI.app'],
+    ['codedaddy-cn.DS_Store', 'CodeDaddy CN.app'],
+    ['codedaddy.DS_Store', 'CodeDaddy.app'],
+  ];
+  for (const [name, app] of layouts) {
+    const bytes = fs.readFileSync(path.join(repoRoot, 'scripts', 'assets', 'dmg-layout', name));
+    const utf16be = value => Buffer.from(value, 'utf16le').swap16();
+    assert.ok(bytes.includes(utf16be(app)), `${name} must contain its app item`);
+    assert.ok(bytes.includes(utf16be('Applications')), `${name} must contain Applications`);
+  }
+});
+
 test('Windows installer writes through the console API for PowerShell 5.1 compatibility', () => {
   const installer = read('install-win.ps1');
   const entry = read('install-win.cmd');
