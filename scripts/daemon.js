@@ -411,6 +411,7 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.25：首页弹窗任务补齐成长/活动入口，并按 renderer 页面身份修复重连后的 pageReady 触发。
 // 1.2.26：无效账号备份不再显示可点击的切换按钮，导入路径拒绝写入无效认证数据。
 // 1.2.27：CodeBuddy 原生会话丢失时，在安全存储恢复后自动从已确认备份恢复，退出登录保留显式抑制标记。
+// 1.2.28：Windows 更新安装器启动幂等，避免下载完成后的按钮竞态重复拉起 Setup.exe。
 // 1.2.43：自动化支持从 GitHub/Gitee 发现、缓存、去重并导入公开任务；签到不再作为内置任务安装。
 // 1.2.44：会话复制不再拆分重复血缘，缺失登记时认领已有副本；会话页显示可恢复进度，用量统计弹窗改版。
 // 1.2.45：自动化协议 V2 增加通用运行上下文、TTL/UUID/数值能力；账号页增加每日任务三环进度。
@@ -479,8 +480,8 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.18：自动化 session.create 可选 cwd（绝对路径）/ workspace（侧栏工作区名）指定新会话
 //         工作目录；工作区不存在或绑定校验不通过时拒绝发送，不退回默认目录。
 // 1.2.20：CodeBuddy 原生安全存储不可用时保护已有加密会话，并给出钥匙串/密钥环修复提示。
-const DAEMON_VERSION = '1.2.27';
-const DAEMON_BUILD_ID = 'release-1.2.27-20261011-codebuddy-native-session-recovery';
+const DAEMON_VERSION = '1.2.28';
+const DAEMON_BUILD_ID = 'release-1.2.28-20261011-windows-installer-dedupe';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -725,6 +726,7 @@ const updateState = {
 };
 let updateTimer = null;
 let updateDownloadPromise = null;
+let updateApplyPromise = null;
 
 // 启动时读取上次成功的更新源（粘性源）：下次检查优先用它，避免 GitHub 不通时每次都白等一次超时。
 try {
@@ -1477,6 +1479,24 @@ function extractAppFromDmg(dmgPath) {
 // 安装：macOS 继续使用 apply-update.sh；Windows 打开已校验的可见 Setup.exe，
 // 由 Inno Setup 确认 WorkBuddy 已退出、替换文件并启动新版。
 function applyUpdate() {
+  if (updateState.status === 'installer-opened' && updateState.attemptId) {
+    updateDebug('installer-already-open', { attemptId: updateState.attemptId, assetName: updateState.assetName });
+    return Promise.resolve({
+      ok: true,
+      opened: true,
+      alreadyOpen: true,
+      status: 'installer-opened',
+      message: '安装程序已打开，请到任务栏选择安装窗口完成安装',
+    });
+  }
+  if (updateApplyPromise) return updateApplyPromise;
+  updateApplyPromise = applyUpdateOnce().finally(() => {
+    updateApplyPromise = null;
+  });
+  return updateApplyPromise;
+}
+
+function applyUpdateOnce() {
   if (IS_PORTABLE_WIN) return Promise.reject(new Error('便携版不能运行安装式更新，请手动下载新版 ZIP'));
   if (!updateState.downloaded) {
     updateDebug('apply-error', { stage: 'preflight', error: '尚未下载完成', latest: updateState.latest });
@@ -1562,7 +1582,7 @@ function applyUpdate() {
         updateState.status = 'installer-opened';
         updateState.message = '安装程序已打开';
         updateDebug('installer-opened', { attemptId: attempt.id, pid: child.pid, assetName: updateState.assetName });
-        resolve({ ok: true, opened: true, status: 'installer-opened', message: '安装程序已打开，请按提示完成安装' });
+        resolve({ ok: true, opened: true, status: 'installer-opened', message: '安装程序已打开，请到任务栏选择安装窗口完成安装' });
       });
     });
   }

@@ -1815,6 +1815,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     '当前模型已触发频率限制，已停止自动发送': 'This model is rate limited; automatic sending stopped', '当前账号积分已耗尽': 'This account has no credits left', '模型：': 'Model: ',
     '无法打开安装程序': 'Could not open the installer',
     '安装程序已打开，请按提示退出 WorkBuddy 并完成安装。': 'The installer is open. Please quit WorkBuddy as prompted and finish installing.',
+    '安装程序已打开，请到任务栏选择安装窗口；按提示退出 WorkBuddy 后完成安装。': 'The installer is open. Select its window from the taskbar, then quit WorkBuddy as prompted to finish installing.',
     '停止旧服务…': 'Stopping old service…', '发现新版本，准备更新…': 'New version available; preparing to update…',
     '已应用主题「': 'Theme applied: “', '已恢复官方头像': 'Restored the official avatar', '已应用官方头像': 'Applied the official avatar',
     '头像已更新 ✓': 'Avatar updated ✓', '头像处理失败：': 'Avatar processing failed:',
@@ -10986,8 +10987,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
     }
 
+    var windowsInstallerOpening = false;
     function openWindowsInstaller(prog, btn) {
-      if (!btn) return;
+      if (!btn || windowsInstallerOpening) return;
+      windowsInstallerOpening = true;
       btn.disabled = true;
       btn.textContent = '正在打开…';
       appendUpdateLog(prog, '正在打开已校验的安装程序…');
@@ -10998,8 +11001,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           throw rejected;
         }
         btn.textContent = '安装程序已打开';
-        appendUpdateLog(prog, '安装程序已打开，请按提示退出 WorkBuddy 并完成安装。');
+        appendUpdateLog(prog, '安装程序已打开，请到任务栏选择安装窗口；按提示退出 WorkBuddy 后完成安装。');
       }).catch(function (error) {
+        windowsInstallerOpening = false;
         btn.disabled = false;
         btn.textContent = '打开安装程序';
         var failure = formatUpdateFailure(error, '无法打开安装程序');
@@ -11008,7 +11012,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       });
     }
 
-    function showWindowsInstallerReady(prog, btn, card, timer) {
+    function showWindowsInstallerReady(prog, btn, card, timer, keepDisabled) {
       if (timer) clearInterval(timer);
       appendUpdateLog(prog, '即将打开安装包…');
       var bar = card ? card.querySelector('#wbs-update-bar') : null;
@@ -11016,14 +11020,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (bar) bar.style.display = '';
       if (barFill) barFill.style.width = '100%';
       if (btn) {
-        btn.disabled = false;
+        btn.disabled = !!keepDisabled;
         btn.textContent = '打开安装程序';
-        btn.onclick = function () { openWindowsInstaller(prog, btn); };
+        btn.onclick = keepDisabled ? null : function () { openWindowsInstaller(prog, btn); };
       }
     }
 
     function openWindowsInstallerAfterDownload(prog, btn, card, timer, resolve, reject) {
-      showWindowsInstallerReady(prog, btn, card, timer);
+      if (windowsInstallerOpening) return;
+      windowsInstallerOpening = true;
+      showWindowsInstallerReady(prog, btn, card, timer, true);
       api('/api/update-apply', { method: 'POST' }).then(function (result) {
         if (!result || !result.ok || !result.opened) {
           var rejected = new Error(formatUpdateFailure(result, '无法打开安装程序'));
@@ -11037,6 +11043,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
         resolve(true);
       }).catch(function (error) {
+        windowsInstallerOpening = false;
         var failure = formatUpdateFailure(error, '无法打开安装程序');
         appendUpdateLog(prog, failure);
         try { toast(failure, true, root); } catch (_) {}

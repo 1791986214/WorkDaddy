@@ -1138,7 +1138,7 @@ test('Windows updater stops at the installer prompt after download', () => {
   assert.doesNotMatch(script, /var WBS_PLATFORM = '__WBS_PLATFORM__'/);
   const injectedWindows = script.replace(/__WBS_PLATFORM__/g, JSON.stringify('win32'));
   assert.match(injectedWindows, /var WBS_PLATFORM = "win32";/);
-  assert.match(script, /function showWindowsInstallerReady\(prog, btn, card, timer\)/);
+  assert.match(script, /function showWindowsInstallerReady\(prog, btn, card, timer(?:, keepDisabled)?\)/);
   assert.match(script, /function openWindowsInstallerAfterDownload\(prog, btn, card, timer, resolve, reject\)/);
   assert.match(script, /appendUpdateLog\(prog, '即将打开安装包…'\)/);
   assert.match(script, /if \(WBS_PLATFORM === 'win32'\) \{[\s\S]*openWindowsInstallerAfterDownload\(prog, btn, card, timer, resolve, reject\);/);
