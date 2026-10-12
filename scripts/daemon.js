@@ -31,7 +31,8 @@ const net = require('net');
 let sessionSync = require('./session-sync.js');
 const {createCodeBuddyFiles} = require('./codebuddy-files.js');
 const { createAccountCreditCache } = require('./account-credit-cache.js');
-const { spawn, spawnSync } = require('child_process');
+const { spawn, spawnSync, execFile } = require('child_process');
+const PROBE_CLIENT_RUNNING = process.argv.includes('--probe-client-running');
 const {
   assertSameProcessIdentity,
   detectWindowsPrivilege,
@@ -480,8 +481,15 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.18：自动化 session.create 可选 cwd（绝对路径）/ workspace（侧栏工作区名）指定新会话
 //         工作目录；工作区不存在或绑定校验不通过时拒绝发送，不退回默认目录。
 // 1.2.20：CodeBuddy 原生安全存储不可用时保护已有加密会话，并给出钥匙串/密钥环修复提示。
-const DAEMON_VERSION = '1.2.28';
-const DAEMON_BUILD_ID = 'release-1.2.28-20261011-windows-installer-dedupe';
+// 1.2.30：/api/status 的客户端运行状态改为后台定时刷新 + 请求直读缓存。Windows 上
+//         safeClientRunning() 会冷启 PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），
+//         在请求线程里执行会把状态接口拖到远超 launcher HTTP 发现预算的程度，温启动
+//         时 launcher 发现不到已在监听的 daemon，误选备用 UI 端口后失败退出。
+//         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS；Windows app.asar
+//         页面归属与 CDP 目标等待窗口也同步修复。
+// 1.2.35：账号页合并加密备份 token 刷新后的有效期快照，并按自然日限制成功刷新一次。
+const DAEMON_VERSION = '1.2.35';
+const DAEMON_BUILD_ID = 'release-1.2.35-20261012-panel-token-daily-limit';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -2680,6 +2688,41 @@ function safeClientRunning() {
   }
 }
 
+// /api/status 曾直接在请求线程里调用 safeClientRunning()：Windows 上这会同步冷启
+// PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），把状态接口拖到远超 launcher HTTP
+// 探测预算（1500ms）的程度，温启动时 launcher 发现不到已在监听的 daemon，误选
+// 备用 UI 端口并覆写 ui-port.json，最终以「daemon 未绑定当前 UI 端口与当前 profile
+// 状态」失败退出。现改为后台定时刷新 + 请求直读缓存，状态接口恒为毫秒级；缓存
+// 未就绪时为 null（未知），与探测失败时的既有语义一致。
+// 注意：刷新必须走一次性子进程（--probe-client-running）——同步探测会阻塞 daemon
+// 事件循环数秒，放在主线程里只会把「每次请求慢」变成「周期性不可用」。
+const clientRunningState = { value: null, checkedAt: 0 };
+const CLIENT_RUNNING_REFRESH_MS = 5000;
+let clientRunningRefreshInFlight = false;
+function refreshClientRunning() {
+  if (clientRunningRefreshInFlight) return Promise.resolve(clientRunningState.value);
+  clientRunningRefreshInFlight = true;
+  return new Promise((resolve) => {
+    execFile(process.execPath, [__filename, '--probe-client-running'], {
+      encoding: 'utf8', timeout: 15000, windowsHide: true,
+    }, (error, stdout) => {
+      // 探测失败（超时/异常/输出不可解析）时保留上一次已知值，绝不让状态接口失败
+      if (!error) {
+        try { clientRunningState.value = JSON.parse(String(stdout)).running; } catch (_) {}
+      }
+      clientRunningState.checkedAt = Date.now();
+      clientRunningRefreshInFlight = false;
+      resolve(clientRunningState.value);
+    });
+  });
+}
+// 启动时立即刷新一次，随后按固定间隔在后台刷新（unref 避免阻止进程退出）
+refreshClientRunning().catch(() => {});
+if (typeof setInterval === 'function') {
+  const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, CLIENT_RUNNING_REFRESH_MS);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+}
+
 async function cdpLoop() {
   for (;;) {
     if (!cdp.connected) {
@@ -2694,7 +2737,8 @@ async function cdpLoop() {
     // 表现为右下角机器人按钮消失且无任何可操作的提示。这里只做检测与状态暴露，
     // 不静默杀进程；恢复由用户在状态页一键触发（POST /api/client/relaunch）。
     try {
-      updateClientDebugState({ cdpConnected: cdp.connected, clientRunning: safeClientRunning() });
+      // clientRunning 已由后台一次性子进程刷新，避免 cdpLoop 周期性阻塞事件循环。
+      updateClientDebugState({ cdpConnected: cdp.connected, clientRunning: clientRunningState.value });
     } catch (e) {
       log(`[cdp] 客户端状态探测异常: ${e.message}`);
     }
@@ -2830,6 +2874,7 @@ const PROFILE_BINARY_NAMES = new Set((
   PROFILE.binaryNames || (PROFILE.id === 'workbuddy-ai' ? ['workbuddyai.exe'] :
     PROFILE.id === 'workbuddy-cn' ? ['workbuddy.exe'] : ['codebuddy.exe'])
 ).map((name) => String(name).toLowerCase()));
+
 function queryWindowsWorkBuddyProcesses() {
   const names = [...PROFILE_BINARY_NAMES].map((name) => `\"${name}\"`).join(',');
   const helper = path.join(__dirname, 'windows-process-boundary.ps1');
@@ -4084,10 +4129,93 @@ function saveCheckinCache(cache) {
   }
 }
 
-// 加密备份的刷新结果只在 daemon 生命周期内缓存，绝不把解密后的 token 写回磁盘。
+// 加密备份的刷新结果只缓存公开时间字段，绝不把解密后的 token 写回磁盘。
 const backupAuthRuntimeCache = new Map();
+let accountTokenRefreshInFlight = null;
+const TOKEN_REFRESH_STATE_FILE = path.join(DATA_DIR, 'token-refresh-state.json');
+let tokenRefreshState = null;
 
-/** 刷新备份账号凭证：临期惰性刷新，或距上次刷新超过一天时执行保活。 */
+function accountBackupSignature(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function loadTokenRefreshState() {
+  if (tokenRefreshState) return tokenRefreshState;
+  let parsed = null;
+  try { parsed = JSON.parse(fs.readFileSync(TOKEN_REFRESH_STATE_FILE, 'utf8')); } catch (_) {}
+  tokenRefreshState = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed
+    : {};
+  if (!tokenRefreshState.accounts || typeof tokenRefreshState.accounts !== 'object' || Array.isArray(tokenRefreshState.accounts)) {
+    tokenRefreshState.accounts = {};
+  }
+  return tokenRefreshState;
+}
+
+function saveTokenRefreshState() {
+  const tmp = `${TOKEN_REFRESH_STATE_FILE}.tmp.${process.pid}`;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(loadTokenRefreshState(), null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, TOKEN_REFRESH_STATE_FILE);
+    try { fs.chmodSync(TOKEN_REFRESH_STATE_FILE, 0o600); } catch (_) {}
+  } catch (error) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+    log('[token-refresh] 写入每日刷新状态失败: ' + redactDiagnosticText(error && error.message || error, 300));
+  }
+}
+
+function persistedTokenRefreshState(uid, signature) {
+  const record = loadTokenRefreshState().accounts[String(uid || '')];
+  if (!record || record.signature !== signature) return null;
+  return record;
+}
+
+function rememberTokenRefreshSuccess(uid, file, auth) {
+  const signature = accountBackupSignature(file);
+  if (!signature) return;
+  const lastRefreshTime = normalizeTokenTimestamp(auth && auth.lastRefreshTime) || Date.now();
+  loadTokenRefreshState().accounts[String(uid)] = {
+    signature,
+    lastRefreshTime,
+    expiresAt: normalizeTokenTimestamp(auth && auth.expiresAt),
+    refreshExpiresAt: normalizeTokenTimestamp(auth && auth.refreshExpiresAt),
+  };
+  saveTokenRefreshState();
+}
+
+/**
+ * 将加密备份 token 刷新后仅存在内存中的公开时间字段合并到账号列表。
+ * 加密备份不能把解密后的 token 写回磁盘，但账号页仍应显示新有效期。
+ */
+function listAccountsWithRuntimeTokenCache() {
+  return listAccounts(DATA_DIR).map((account) => {
+    let file;
+    try { file = accountBackupFile(account.uid); } catch (_) { return account; }
+    const signature = accountBackupSignature(file);
+    const cached = backupAuthRuntimeCache.get(account.uid);
+    if (cached && cached.signature !== signature) {
+      backupAuthRuntimeCache.delete(account.uid);
+    }
+    const persisted = persistedTokenRefreshState(account.uid, signature);
+    const auth = cached && cached.signature === signature && cached.root && cached.root.auth
+      ? cached.root.auth
+      : persisted;
+    if (!auth) return account;
+    return Object.assign({}, account, {
+      tokenExpiresAt: auth.expiresAt || null,
+      refreshExpiresAt: auth.refreshExpiresAt || null,
+      lastRefreshTime: auth.lastRefreshTime || null,
+    });
+  });
+}
+
+/** 刷新备份账号凭证：临期惰性刷新，或当天尚未成功刷新时执行保活。 */
 async function refreshAccountBackupToken(uid, options = {}) {
   const file = path.join(DATA_DIR, 'accounts', uid + '.info');
   let root;
@@ -4108,10 +4236,15 @@ async function refreshAccountBackupToken(uid, options = {}) {
   const auth = root && root.auth && typeof root.auth === 'object' ? root.auth : null;
   if (!auth) return { root, skipped: true, reason: 'no-auth' };
   const now = Date.now();
-  const lastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime);
+  const persisted = persistedTokenRefreshState(uid, sourceSignature);
+  const authLastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime) || 0;
+  const persistedLastRefreshTime = normalizeTokenTimestamp(persisted && persisted.lastRefreshTime) || 0;
+  const lastRefreshTime = Math.max(authLastRefreshTime, persistedLastRefreshTime) || null;
+  const lastRefreshDay = lastRefreshTime === null ? null : todayStr(new Date(lastRefreshTime));
   const dailyDue = options.dailyKeepalive === true &&
-    (lastRefreshTime === null || now - lastRefreshTime >= TOKEN_REFRESH_DAY_MS);
-  if (!dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
+    (lastRefreshDay === null || lastRefreshDay !== todayStr(new Date(now)));
+  if (options.dailyKeepalive === true && !dailyDue) return { root, skipped: true };
+  if (options.force !== true && !dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
 
   const result = await refreshAuthToken(auth, { apiHost: PROFILE.apiHost, fetchImpl: globalThis.fetch, now });
   if (!result.ok) {
@@ -4121,6 +4254,7 @@ async function refreshAccountBackupToken(uid, options = {}) {
   const nextRoot = Object.assign({}, root, { auth: result.auth });
   if (encryptedAtRest) {
     backupAuthRuntimeCache.set(uid, { signature: sourceSignature, root: nextRoot });
+    rememberTokenRefreshSuccess(uid, file, result.auth);
     log(`[token-refresh] 账号 ${uid} 已刷新（加密备份仅保存在内存）`);
     return { root: nextRoot, refreshed: true, persisted: false };
   }
@@ -4135,7 +4269,46 @@ async function refreshAccountBackupToken(uid, options = {}) {
     return { root, refreshed: false, error: 'write-account-failed: ' + e.message };
   }
   backupAuthRuntimeCache.delete(uid);
+  rememberTokenRefreshSuccess(uid, file, result.auth);
   return { root: nextRoot, refreshed: true, persisted: true };
+}
+
+/**
+ * 打开账号面板时按日保活全部备份账号，避免只有切换到某个账号后它才获得一次刷新机会。
+ * 刷新请求限并发，并复用进行中的批次，避免快速开关面板造成 refresh token 风暴。
+ */
+async function refreshAllAccountTokensOnPanelOpen() {
+  if (accountTokenRefreshInFlight) return accountTokenRefreshInFlight;
+  const task = (async () => {
+    const accounts = listAccounts(DATA_DIR);
+    const results = new Array(accounts.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < accounts.length) {
+        const index = next++;
+        const uid = accounts[index].uid;
+        try {
+          const result = await refreshAccountBackupToken(uid, { dailyKeepalive: true, force: true });
+          results[index] = { refreshed: result.refreshed === true, skipped: result.skipped === true, failed: !!result.error };
+        } catch (_) {
+          results[index] = { refreshed: false, skipped: false, failed: true };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, accounts.length) }, worker));
+    return {
+      ok: true,
+      total: results.length,
+      refreshed: results.filter((item) => item && item.refreshed).length,
+      skipped: results.filter((item) => item && item.skipped).length,
+      failed: results.filter((item) => item && item.failed).length,
+    };
+  })();
+  const wrapped = task.finally(() => {
+    if (accountTokenRefreshInFlight === wrapped) accountTokenRefreshInFlight = null;
+  });
+  accountTokenRefreshInFlight = wrapped;
+  return wrapped;
 }
 
 /**
@@ -10104,7 +10277,8 @@ function handleApi(req, res) {
       },
       client: {
         // 客户端进程是否在跑 / 调试端口是否可达 / 是否命中"更新后丢失调试端口"状态
-        running: safeClientRunning(),
+        // running 由后台定时刷新（refreshClientRunning），请求线程直读缓存，不再同步探测
+        running: clientRunningState.value,
         cdpReachable: cdp.connected,
         needsDebugRelaunch: clientDebugState.needsDebugRelaunch,
         debugStateUpdatedAt: clientDebugState.updatedAt || null,
@@ -10275,8 +10449,17 @@ function handleApi(req, res) {
     });
   }
 
+  if (req.method === 'POST' && p === '/api/accounts/refresh-tokens') {
+    return refreshAllAccountTokensOnPanelOpen()
+      .then((result) => json(res, 200, result))
+      .catch((error) => {
+        log('[token-refresh] 打开账号面板时刷新全部账号失败: ' + redactDiagnosticText(error && error.message || error, 300));
+        return json(res, 500, { ok: false, error: '账号 token 刷新失败' });
+      });
+  }
+
   if (req.method === 'GET' && p === '/api/accounts') {
-    const accounts = listAccounts(DATA_DIR);
+    const accounts = listAccountsWithRuntimeTokenCache();
     const checkinAutomationEnabled = readAutomations(DATA_DIR).some(task => task.enabled && stepsContainCheckin(task.steps));
     const cache = loadCheckinCache();
     const today = todayStr();
@@ -12413,6 +12596,13 @@ process.on('unhandledRejection', (reason) => {
   log('[fatal] 未处理 Promise 异常: ' + (reason && reason.stack || reason));
   captureException(reason, { stage: 'daemon-unhandled-rejection' }).catch(() => {});
 });
+
+// 一次性子进程模式必须等到 safeClientRunning() 所需的所有依赖完成初始化后再执行。
+// 放在 daemon 锁、HTTP 服务和后台任务启动前，探测进程不会抢占正常 daemon 实例。
+if (PROBE_CLIENT_RUNNING) {
+  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
+  process.exit(0);
+}
 
 ensureDirs(DATA_DIR, log);
 if (!acquireDaemonLock()) process.exit(0);
