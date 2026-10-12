@@ -86,6 +86,18 @@ test('native daemon wait allows the watchdog up to 60 seconds to become ready', 
   assert.match(src.slice(start, end), /attempts\s*=\s*240/);
 });
 
+test('native daemon startup exposes non-blocking progress notifications', () => {
+  const src = read('scripts/win-launcher.js');
+  assert.match(src, /function runHiddenPowerShell\(script, options = \{\}\)/);
+  assert.match(src, /detached:\s*true/);
+  assert.match(src, /runHiddenPowerShell\(ps, \{ detached: true \}\)/);
+  assert.match(src, /showWindowsNotification\(WBS_BRAND, ['"]正在启动 WorkDaddy 后台服务，请稍候/);
+  assert.match(src, /后台服务仍在启动[\s\S]*请勿重复点击/);
+  assert.match(src, /15\s*\*\s*1000/);
+  assert.match(src, /30\s*\*\s*1000/);
+  assert.match(src, /45\s*\*\s*1000/);
+});
+
 test('native consent policy rejects missing, corrupt, foreign and no-longer-eligible consent', (t) => {
   const { spawnSync } = require('node:child_process');
   const os = require('node:os');

@@ -187,17 +187,27 @@ function relaunchWithDesktopShell(nodeBin) {
   }
 }
 
-function runHiddenPowerShell(script) {
+function runHiddenPowerShell(script, options = {}) {
   if (process.platform !== 'win32') return;
   try {
     const encoded = Buffer.from(String(script), 'utf16le').toString('base64');
     // Resolve the system PowerShell explicitly. The managed Node runtime may
     // resolve a different shim when the shortcut is launched via wscript.
     const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const result = spawnSync(powershell, [
+    const args = [
       '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
       '-EncodedCommand', encoded,
-    ], { stdio: 'ignore', windowsHide: true, timeout: 10000 });
+    ];
+    if (options.detached) {
+      const child = spawn(powershell, args, {
+        stdio: 'ignore', windowsHide: true, detached: true,
+      });
+      child.once('error', (error) => log('Windows 本地提示调用失败: ' + error.message));
+      child.unref();
+      log('Windows 本地提示已异步派发');
+      return;
+    }
+    const result = spawnSync(powershell, args, { stdio: 'ignore', windowsHide: true, timeout: 10000 });
     if (result.error) log('Windows 本地提示调用失败: ' + result.error.message);
     else if (result.status !== 0) log('Windows 本地提示退出码: ' + result.status);
     else log('Windows 本地提示已完成');
@@ -218,7 +228,9 @@ function showWindowsNotification(title, message) {
     `$n.Icon=[System.Drawing.SystemIcons]::Information; $n.Visible=$true; ` +
     `$n.BalloonTipTitle=${powershellQuote(title)}; $n.BalloonTipText=${powershellQuote(message)}; ` +
     `$n.ShowBalloonTip(5000); Start-Sleep -Milliseconds 5500; $n.Dispose()`;
-  runHiddenPowerShell(ps);
+  // A balloon notification sleeps for 5.5s while it remains visible. It must
+  // not hold up daemon/CDP startup or make a slow install look hung.
+  runHiddenPowerShell(ps, { detached: true });
 }
 
 function powershellQuote(value) {
@@ -1546,10 +1558,22 @@ function nativeDaemonStatusMatches(status) {
 }
 
 // 原生 helper/PowerShell/CIM 冷启动可能超过 10 秒；给 watchdog/daemon 60 秒完成初始化，
-// 避免第一次等待失败后重复清理并制造第二个启动竞态。
-async function waitForNativeDaemon(attempts = 240) {
+// 避免第一次等待失败后重复清理并制造第二个启动竞态。等待期间通过 detached
+// NotifyIcon 报告进度，通知本身不能阻塞这条启动链。
+const NATIVE_DAEMON_PROGRESS_INTERVALS_MS = [15 * 1000, 30 * 1000, 45 * 1000];
+async function waitForNativeDaemon(attempts = 240, onProgress = null) {
+  const startedAt = Date.now();
+  const deadline = startedAt + attempts * 250;
+  let nextProgressIndex = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) await sleep(250);
+    if (Date.now() >= deadline) break;
+    const elapsed = Date.now() - startedAt;
+    while (onProgress && nextProgressIndex < NATIVE_DAEMON_PROGRESS_INTERVALS_MS.length &&
+      elapsed >= NATIVE_DAEMON_PROGRESS_INTERVALS_MS[nextProgressIndex]) {
+      onProgress(NATIVE_DAEMON_PROGRESS_INTERVALS_MS[nextProgressIndex]);
+      nextProgressIndex += 1;
+    }
     const status = await readStatus();
     if (nativeDaemonStatusMatches(status)) return status;
   }
@@ -1596,8 +1620,13 @@ async function ensureDaemonNative(nodeBin) {
     });
     child.unref();
   };
+  const waitWithProgress = () => waitForNativeDaemon(240, (elapsedMs) => {
+    const seconds = Math.max(1, Math.round(elapsedMs / 1000));
+    showWindowsNotification(WBS_BRAND, `后台服务仍在启动（已等待约 ${seconds} 秒），请勿重复点击。`);
+  });
+  showWindowsNotification(WBS_BRAND, '正在启动 WorkDaddy 后台服务，请稍候……');
   startWatchdog();
-  status = await waitForNativeDaemon();
+  status = await waitWithProgress();
   if (status) return true;
 
   // A previous watchdog may own the OS lock while its daemon is unhealthy.
@@ -1606,8 +1635,9 @@ async function ensureDaemonNative(nodeBin) {
   await stopVerifiedLegacyManagedLifecycle(nodeBin);
   stopNativeLifecycle();
   await sleep(800);
+  showWindowsNotification(WBS_BRAND, '正在重新启动 WorkDaddy 后台服务，请稍候……');
   startWatchdog();
-  status = await waitForNativeDaemon();
+  status = await waitWithProgress();
   if (status) return true;
   const error = new Error('等待 WorkDaddy 后台服务启动超时');
   error.sentryStage = 'windows-native-launcher-daemon-timeout';
