@@ -282,8 +282,10 @@ test('native lifecycle cleanup clears an access-denied PID that is absent from t
   const deniedResult = inspect.indexOf('return false, exitAccessDenied', absent);
   assert.ok(denied >= 0, 'access-denied inspection must stay fail-closed');
   assert.ok(snapshot > denied, 'access-denied inspection must refresh the process snapshot');
-  assert.ok(absent > snapshot && deniedResult > absent, 'only a PID absent from the snapshot may be treated as stale');
+  assert.ok(absent > snapshot && deniedResult > absent, 'absent PIDs must be treated as stale while uncertain identities remain fail-closed');
   assert.match(inspect.slice(snapshot, deniedResult), /record\.PID == uint32\(pid\)[\s\S]*if !present[\s\S]*return false, 0, nil/);
+  assert.match(inspect.slice(snapshot, deniedResult), /processNameDiffers\(record\.Name, expectedPath\)[\s\S]*return false, 0, nil/);
+  assert.match(inspect, /if !samePath\(actual, expectedPath\)[\s\S]*processNameDiffers\(filepath\.Base\(actual\), expectedPath\)[\s\S]*return false, 0, nil/);
 });
 
 test('elevated lifecycle cleanup inspects exact state before refusing active termination', () => {
