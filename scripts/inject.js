@@ -11572,7 +11572,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         else if (newlyOpened && typeof preloadAutomationDiscovery === 'function') preloadAutomationDiscovery().catch(function () {});
         if (newlyOpened && !(options && options.automation)) api('/api/automations/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'panelOpened' }) }).catch(function () {});
         if (newlyOpened) state.dailyProgressForceNext = true;
-        refresh();
+        var panelRefresh = refresh();
+        if (newlyOpened && CAPS.accounts) {
+          // Refresh every backup account after the initial snapshot. The daemon
+          // applies its daily keepalive/near-expiry policy and coalesces repeats;
+          // a second snapshot updates displayed expiry times after rotated tokens.
+          Promise.resolve(panelRefresh).then(function () {
+            return api('/api/accounts/refresh-tokens', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+            });
+          }).then(function (result) {
+            if (!alive || !state.open || !result || Number(result.refreshed) <= 0) return;
+            refresh();
+          }).catch(function () {});
+        }
         checkForUpdate(); // 打开面板即检测更新（每次打开都强制查一次新版本）
         try { acCheckPromptOnOpen(); } catch (e) {} // 每次打开面板：指令块丢失则请求 daemon 补写（无 toast）
         try { syncSessionModule(); } catch (e) {} // 每次打开面板刷新会话模块（开关+快捷短语，含外部修改）

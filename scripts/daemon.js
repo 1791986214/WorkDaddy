@@ -487,8 +487,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         时 launcher 发现不到已在监听的 daemon，误选备用 UI 端口后失败退出。
 //         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS；Windows app.asar
 //         页面归属与 CDP 目标等待窗口也同步修复。
-const DAEMON_VERSION = '1.2.30';
-const DAEMON_BUILD_ID = 'release-1.2.30-20261012-windows-startup-followup';
+// 1.2.31：打开账号面板时按日保活全部备份账号 token，刷新完成后更新账号快照。
+const DAEMON_VERSION = '1.2.31';
+const DAEMON_BUILD_ID = 'release-1.2.31-20261012-panel-token-refresh';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -4130,6 +4131,7 @@ function saveCheckinCache(cache) {
 
 // 加密备份的刷新结果只在 daemon 生命周期内缓存，绝不把解密后的 token 写回磁盘。
 const backupAuthRuntimeCache = new Map();
+let accountTokenRefreshInFlight = null;
 
 /** 刷新备份账号凭证：临期惰性刷新，或距上次刷新超过一天时执行保活。 */
 async function refreshAccountBackupToken(uid, options = {}) {
@@ -4180,6 +4182,44 @@ async function refreshAccountBackupToken(uid, options = {}) {
   }
   backupAuthRuntimeCache.delete(uid);
   return { root: nextRoot, refreshed: true, persisted: true };
+}
+
+/**
+ * 打开账号面板时按日保活全部备份账号，避免只有切换到某个账号后它才获得一次刷新机会。
+ * 刷新请求限并发，并复用进行中的批次，避免快速开关面板造成 refresh token 风暴。
+ */
+async function refreshAllAccountTokensOnPanelOpen() {
+  if (accountTokenRefreshInFlight) return accountTokenRefreshInFlight;
+  const task = (async () => {
+    const accounts = listAccounts(DATA_DIR);
+    const results = new Array(accounts.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < accounts.length) {
+        const index = next++;
+        const uid = accounts[index].uid;
+        try {
+          const result = await refreshAccountBackupToken(uid, { dailyKeepalive: true });
+          results[index] = { refreshed: result.refreshed === true, skipped: result.skipped === true, failed: !!result.error };
+        } catch (_) {
+          results[index] = { refreshed: false, skipped: false, failed: true };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, accounts.length) }, worker));
+    return {
+      ok: true,
+      total: results.length,
+      refreshed: results.filter((item) => item && item.refreshed).length,
+      skipped: results.filter((item) => item && item.skipped).length,
+      failed: results.filter((item) => item && item.failed).length,
+    };
+  })();
+  const wrapped = task.finally(() => {
+    if (accountTokenRefreshInFlight === wrapped) accountTokenRefreshInFlight = null;
+  });
+  accountTokenRefreshInFlight = wrapped;
+  return wrapped;
 }
 
 /**
@@ -10318,6 +10358,15 @@ function handleApi(req, res) {
         return json(res, 400, { ok: false, error: error.message });
       }
     });
+  }
+
+  if (req.method === 'POST' && p === '/api/accounts/refresh-tokens') {
+    return refreshAllAccountTokensOnPanelOpen()
+      .then((result) => json(res, 200, result))
+      .catch((error) => {
+        log('[token-refresh] 打开账号面板时刷新全部账号失败: ' + redactDiagnosticText(error && error.message || error, 300));
+        return json(res, 500, { ok: false, error: '账号 token 刷新失败' });
+      });
   }
 
   if (req.method === 'GET' && p === '/api/accounts') {
