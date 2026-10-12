@@ -91,6 +91,11 @@ const CDP_STARTUP_TIMEOUT_MS = 60000;
 // Electron/ShellExecute 冷启动可能超过 5 秒；过早换端口会让首个实例与重试实例发生单实例冲突。
 const CDP_PORT_RETRY_GRACE_MS = 15000;
 const INJECT_REQUEST_TIMEOUT_MS = 5000;
+// daemon 的 /api/status 可能等待后台客户端进程枚举（Windows 上旧实现曾达数秒）。
+// 启动器的 UI 端口发现与 daemon 状态读取必须容忍这种慢响应：预算过短会把仍在
+// 监听的 daemon 误判为不存在，进而误选备用端口并以「daemon 未绑定当前 UI 端口」
+// 失败退出。与 daemon 侧 spawnSync 的 10s 进程查询预算保持同量级并留出余量。
+const HTTP_GET_TIMEOUT_MS = 8000;
 const INJECT_MAX_ATTEMPTS = 6;
 const INJECT_RETRY_DELAY_MS = 1000;
 // 每个 profile 只查询自己的主程序镜像；其他 CodeBuddy/WorkBuddy profile 不参与退出判定。
@@ -303,7 +308,7 @@ function reserveEphemeralCdpPort() {
 
 function httpGet(port, p, headers = {}) {
   return new Promise((resolve) => {
-    const req = http.get({ host: HOST, port, path: p, headers, timeout: 1500 }, (res) => {
+    const req = http.get({ host: HOST, port, path: p, headers, timeout: HTTP_GET_TIMEOUT_MS }, (res) => {
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => resolve({ status: res.statusCode, body }));
@@ -1827,4 +1832,5 @@ module.exports = {
   workBuddyRunning,
   cdpPortCandidates,
   reserveEphemeralCdpPort,
+  httpGet,
 };

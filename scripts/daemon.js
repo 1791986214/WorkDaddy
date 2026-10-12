@@ -31,7 +31,7 @@ const net = require('net');
 let sessionSync = require('./session-sync.js');
 const {createCodeBuddyFiles} = require('./codebuddy-files.js');
 const { createAccountCreditCache } = require('./account-credit-cache.js');
-const { spawn, spawnSync } = require('child_process');
+const { spawn, spawnSync, execFile } = require('child_process');
 const {
   assertSameProcessIdentity,
   detectWindowsPrivilege,
@@ -45,6 +45,14 @@ const {
   selectRunningProfileBinary,
   selectPreferredDiscoveredBinary,
 } = require('./windows-process-boundary.js');
+// 一次性子进程模式：供 /api/status 的后台缓存刷新以非阻塞方式执行同步进程探测。
+// Windows 上的 safeClientRunning() 会阻塞事件循环数秒（PowerShell 冷启 + CIM 枚举），
+// 绝不能跑在 daemon 主线程里；本分支只做一次探测并输出结果后立即退出，
+// 不触碰 daemon 的单实例锁、HTTP 服务与任何其它顶层副作用。
+if (process.argv.includes('--probe-client-running')) {
+  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
+  process.exit(0);
+}
 const DAEMON_PRIVILEGE = process.platform === 'win32'
   ? (process.env.WBSWITCH_NATIVE_LAUNCHER === '1'
     ? detectNativeWindowsPrivilege(path.resolve(__dirname, '..'), process.env.WBSWITCH_PROFILE || 'workbuddy-cn')
@@ -480,8 +488,13 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.18：自动化 session.create 可选 cwd（绝对路径）/ workspace（侧栏工作区名）指定新会话
 //         工作目录；工作区不存在或绑定校验不通过时拒绝发送，不退回默认目录。
 // 1.2.20：CodeBuddy 原生安全存储不可用时保护已有加密会话，并给出钥匙串/密钥环修复提示。
-const DAEMON_VERSION = '1.2.28';
-const DAEMON_BUILD_ID = 'release-1.2.28-20261011-windows-installer-dedupe';
+// 1.2.29：/api/status 的客户端运行状态改为后台定时刷新 + 请求直读缓存。Windows 上
+//         safeClientRunning() 会冷启 PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），
+//         在请求线程里执行会把状态接口拖到远超 launcher HTTP 发现预算的程度，温启动
+//         时 launcher 发现不到已在监听的 daemon，误选备用 UI 端口后失败退出。
+//         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS。
+const DAEMON_VERSION = '1.2.29';
+const DAEMON_BUILD_ID = 'release-1.2.29-20261012-status-nonblocking';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -2678,6 +2691,37 @@ function safeClientRunning() {
   } catch (_) {
     return null;
   }
+}
+
+// /api/status 曾直接在请求线程里调用 safeClientRunning()：Windows 上这会同步冷启
+// PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），把状态接口拖到远超 launcher HTTP
+// 探测预算（1500ms）的程度，温启动时 launcher 发现不到已在监听的 daemon，误选
+// 备用 UI 端口并覆写 ui-port.json，最终以「daemon 未绑定当前 UI 端口与当前 profile
+// 状态」失败退出。现改为后台定时刷新 + 请求直读缓存，状态接口恒为毫秒级；缓存
+// 未就绪时为 null（未知），与探测失败时的既有语义一致。
+// 注意：刷新必须走一次性子进程（--probe-client-running）——同步探测会阻塞 daemon
+// 事件循环数秒，放在主线程里只会把「每次请求慢」变成「周期性不可用」。
+const clientRunningState = { value: null, checkedAt: 0 };
+const CLIENT_RUNNING_REFRESH_MS = 5000;
+function refreshClientRunning() {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [__filename, '--probe-client-running'], {
+      encoding: 'utf8', timeout: 15000, windowsHide: true,
+    }, (error, stdout) => {
+      // 探测失败（超时/异常/输出不可解析）时保留上一次已知值，绝不让状态接口失败
+      if (!error) {
+        try { clientRunningState.value = JSON.parse(String(stdout)).running; } catch (_) {}
+      }
+      clientRunningState.checkedAt = Date.now();
+      resolve(clientRunningState.value);
+    });
+  });
+}
+// 启动时立即刷新一次，随后按固定间隔在后台刷新（unref 避免阻止进程退出）
+refreshClientRunning().catch(() => {});
+if (typeof setInterval === 'function') {
+  const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, CLIENT_RUNNING_REFRESH_MS);
+  if (timer && typeof timer.unref === 'function') timer.unref();
 }
 
 async function cdpLoop() {
@@ -10104,7 +10148,8 @@ function handleApi(req, res) {
       },
       client: {
         // 客户端进程是否在跑 / 调试端口是否可达 / 是否命中"更新后丢失调试端口"状态
-        running: safeClientRunning(),
+        // running 由后台定时刷新（refreshClientRunning），请求线程直读缓存，不再同步探测
+        running: clientRunningState.value,
         cdpReachable: cdp.connected,
         needsDebugRelaunch: clientDebugState.needsDebugRelaunch,
         debugStateUpdatedAt: clientDebugState.updatedAt || null,
