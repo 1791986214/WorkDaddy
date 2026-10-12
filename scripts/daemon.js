@@ -487,9 +487,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         时 launcher 发现不到已在监听的 daemon，误选备用 UI 端口后失败退出。
 //         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS；Windows app.asar
 //         页面归属与 CDP 目标等待窗口也同步修复。
-// 1.2.31：打开账号面板时按日保活全部备份账号 token，刷新完成后更新账号快照。
-const DAEMON_VERSION = '1.2.31';
-const DAEMON_BUILD_ID = 'release-1.2.31-20261012-panel-token-refresh';
+// 1.2.32：打开账号面板时强制刷新全部备份账号 token，刷新完成后更新账号快照。
+const DAEMON_VERSION = '1.2.32';
+const DAEMON_BUILD_ID = 'release-1.2.32-20261012-panel-token-force-refresh';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -4157,7 +4157,7 @@ async function refreshAccountBackupToken(uid, options = {}) {
   const lastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime);
   const dailyDue = options.dailyKeepalive === true &&
     (lastRefreshTime === null || now - lastRefreshTime >= TOKEN_REFRESH_DAY_MS);
-  if (!dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
+  if (options.force !== true && !dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
 
   const result = await refreshAuthToken(auth, { apiHost: PROFILE.apiHost, fetchImpl: globalThis.fetch, now });
   if (!result.ok) {
@@ -4199,7 +4199,7 @@ async function refreshAllAccountTokensOnPanelOpen() {
         const index = next++;
         const uid = accounts[index].uid;
         try {
-          const result = await refreshAccountBackupToken(uid, { dailyKeepalive: true });
+          const result = await refreshAccountBackupToken(uid, { dailyKeepalive: true, force: true });
           results[index] = { refreshed: result.refreshed === true, skipped: result.skipped === true, failed: !!result.error };
         } catch (_) {
           results[index] = { refreshed: false, skipped: false, failed: true };

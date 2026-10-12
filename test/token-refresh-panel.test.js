@@ -10,7 +10,8 @@ const inject = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'inject.js'
 
 test('panel token refresh endpoint keeps every backup account alive', () => {
   assert.match(daemon, /async function refreshAllAccountTokensOnPanelOpen\(\)/);
-  assert.match(daemon, /refreshAccountBackupToken\(uid, \{ dailyKeepalive: true \}\)/);
+  assert.match(daemon, /refreshAccountBackupToken\(uid, \{ dailyKeepalive: true, force: true \}\)/);
+  assert.match(daemon, /options\.force !== true && !dailyDue && !shouldRefreshAccessToken/);
   const routeStart = daemon.indexOf("p === '/api/accounts/refresh-tokens'");
   const routeEnd = daemon.indexOf("if (req.method === 'GET' && p === '/api/accounts')", routeStart);
   assert.ok(routeStart >= 0 && routeEnd > routeStart);
