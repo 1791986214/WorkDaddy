@@ -1285,6 +1285,14 @@ async function injectNowOrPending() {
 }
 
 function hasElevatedSessionConsent() {
+  // [compat-elevated] 兼容补丁：内置 Administrator / 无法降权环境下，安装程序未提供
+  // 「兼容安装」入口（见 issue #380），导致双击图标必然失败（错误码 4/5）。
+  // 支持用环境变量 WBSWITCH_FORCE_ELEVATED=1 强制走 elevated 原生启动路径，
+  // 行为等价于在安装程序中勾选「兼容安装」。默认行为不变。
+  if (process.env.WBSWITCH_FORCE_ELEVATED === '1') {
+    log('已通过 WBSWITCH_FORCE_ELEVATED=1 启用 elevated 兼容启动');
+    return true;
+  }
   try {
     return runNativeHelper([
       '--check-elevated-session', '--profile', PROFILE.id, '--app-dir', WORKDADDY_APP_DIR,
