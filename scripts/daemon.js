@@ -32,6 +32,7 @@ let sessionSync = require('./session-sync.js');
 const {createCodeBuddyFiles} = require('./codebuddy-files.js');
 const { createAccountCreditCache } = require('./account-credit-cache.js');
 const { spawn, spawnSync, execFile } = require('child_process');
+const PROBE_CLIENT_RUNNING = process.argv.includes('--probe-client-running');
 const {
   assertSameProcessIdentity,
   detectWindowsPrivilege,
@@ -45,14 +46,6 @@ const {
   selectRunningProfileBinary,
   selectPreferredDiscoveredBinary,
 } = require('./windows-process-boundary.js');
-// 一次性子进程模式：供 /api/status 的后台缓存刷新以非阻塞方式执行同步进程探测。
-// Windows 上的 safeClientRunning() 会阻塞事件循环数秒（PowerShell 冷启 + CIM 枚举），
-// 绝不能跑在 daemon 主线程里；本分支只做一次探测并输出结果后立即退出，
-// 不触碰 daemon 的单实例锁、HTTP 服务与任何其它顶层副作用。
-if (process.argv.includes('--probe-client-running')) {
-  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
-  process.exit(0);
-}
 const DAEMON_PRIVILEGE = process.platform === 'win32'
   ? (process.env.WBSWITCH_NATIVE_LAUNCHER === '1'
     ? detectNativeWindowsPrivilege(path.resolve(__dirname, '..'), process.env.WBSWITCH_PROFILE || 'workbuddy-cn')
@@ -2703,7 +2696,10 @@ function safeClientRunning() {
 // 事件循环数秒，放在主线程里只会把「每次请求慢」变成「周期性不可用」。
 const clientRunningState = { value: null, checkedAt: 0 };
 const CLIENT_RUNNING_REFRESH_MS = 5000;
+let clientRunningRefreshInFlight = false;
 function refreshClientRunning() {
+  if (clientRunningRefreshInFlight) return Promise.resolve(clientRunningState.value);
+  clientRunningRefreshInFlight = true;
   return new Promise((resolve) => {
     execFile(process.execPath, [__filename, '--probe-client-running'], {
       encoding: 'utf8', timeout: 15000, windowsHide: true,
@@ -2713,6 +2709,7 @@ function refreshClientRunning() {
         try { clientRunningState.value = JSON.parse(String(stdout)).running; } catch (_) {}
       }
       clientRunningState.checkedAt = Date.now();
+      clientRunningRefreshInFlight = false;
       resolve(clientRunningState.value);
     });
   });
@@ -2738,7 +2735,8 @@ async function cdpLoop() {
     // 表现为右下角机器人按钮消失且无任何可操作的提示。这里只做检测与状态暴露，
     // 不静默杀进程；恢复由用户在状态页一键触发（POST /api/client/relaunch）。
     try {
-      updateClientDebugState({ cdpConnected: cdp.connected, clientRunning: safeClientRunning() });
+      // clientRunning 已由后台一次性子进程刷新，避免 cdpLoop 周期性阻塞事件循环。
+      updateClientDebugState({ cdpConnected: cdp.connected, clientRunning: clientRunningState.value });
     } catch (e) {
       log(`[cdp] 客户端状态探测异常: ${e.message}`);
     }
@@ -2874,6 +2872,7 @@ const PROFILE_BINARY_NAMES = new Set((
   PROFILE.binaryNames || (PROFILE.id === 'workbuddy-ai' ? ['workbuddyai.exe'] :
     PROFILE.id === 'workbuddy-cn' ? ['workbuddy.exe'] : ['codebuddy.exe'])
 ).map((name) => String(name).toLowerCase()));
+
 function queryWindowsWorkBuddyProcesses() {
   const names = [...PROFILE_BINARY_NAMES].map((name) => `\"${name}\"`).join(',');
   const helper = path.join(__dirname, 'windows-process-boundary.ps1');
@@ -12458,6 +12457,13 @@ process.on('unhandledRejection', (reason) => {
   log('[fatal] 未处理 Promise 异常: ' + (reason && reason.stack || reason));
   captureException(reason, { stage: 'daemon-unhandled-rejection' }).catch(() => {});
 });
+
+// 一次性子进程模式必须等到 safeClientRunning() 所需的所有依赖完成初始化后再执行。
+// 放在 daemon 锁、HTTP 服务和后台任务启动前，探测进程不会抢占正常 daemon 实例。
+if (PROBE_CLIENT_RUNNING) {
+  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
+  process.exit(0);
+}
 
 ensureDirs(DATA_DIR, log);
 if (!acquireDaemonLock()) process.exit(0);

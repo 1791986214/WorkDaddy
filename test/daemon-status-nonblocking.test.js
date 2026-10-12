@@ -33,6 +33,17 @@ test('status handler reads the cached client state instead of probing in the req
   assert.match(handler, /running:\s*clientRunningState\.value/, 'status handler should read the background-refreshed cache');
 });
 
+test('CDP monitor reuses the background client cache instead of probing synchronously', () => {
+  const loopStart = daemonSource.indexOf('async function cdpLoop()');
+  assert.ok(loopStart > 0, 'cdpLoop not found in daemon.js');
+  const loopEnd = daemonSource.indexOf('\nasync function ', loopStart + 20);
+  const loop = daemonSource.slice(loopStart, loopEnd > loopStart ? loopEnd : loopStart + 5000);
+  assert.doesNotMatch(loop, /clientRunning:\s*safeClientRunning\(\)/,
+    'cdpLoop must not synchronously enumerate client processes');
+  assert.match(loop, /clientRunning:\s*clientRunningState\.value/,
+    'cdpLoop should use the background-refreshed client state');
+});
+
 test('client running probe runs in a one-shot subprocess so the daemon event loop stays free', () => {
   assert.match(daemonSource, /--probe-client-running/, 'one-shot probe subprocess mode not found in daemon.js');
   assert.match(daemonSource, /\bexecFile\b/, 'execFile must be imported for the non-blocking refresh');
