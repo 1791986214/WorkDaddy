@@ -487,9 +487,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 //         时 launcher 发现不到已在监听的 daemon，误选备用 UI 端口后失败退出。
 //         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS；Windows app.asar
 //         页面归属与 CDP 目标等待窗口也同步修复。
-// 1.2.32：打开账号面板时强制刷新全部备份账号 token，刷新完成后更新账号快照。
-const DAEMON_VERSION = '1.2.32';
-const DAEMON_BUILD_ID = 'release-1.2.32-20261012-panel-token-force-refresh';
+// 1.2.35：账号页合并加密备份 token 刷新后的有效期快照，并按自然日限制成功刷新一次。
+const DAEMON_VERSION = '1.2.35';
+const DAEMON_BUILD_ID = 'release-1.2.35-20261012-panel-token-daily-limit';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -4129,11 +4129,93 @@ function saveCheckinCache(cache) {
   }
 }
 
-// 加密备份的刷新结果只在 daemon 生命周期内缓存，绝不把解密后的 token 写回磁盘。
+// 加密备份的刷新结果只缓存公开时间字段，绝不把解密后的 token 写回磁盘。
 const backupAuthRuntimeCache = new Map();
 let accountTokenRefreshInFlight = null;
+const TOKEN_REFRESH_STATE_FILE = path.join(DATA_DIR, 'token-refresh-state.json');
+let tokenRefreshState = null;
 
-/** 刷新备份账号凭证：临期惰性刷新，或距上次刷新超过一天时执行保活。 */
+function accountBackupSignature(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function loadTokenRefreshState() {
+  if (tokenRefreshState) return tokenRefreshState;
+  let parsed = null;
+  try { parsed = JSON.parse(fs.readFileSync(TOKEN_REFRESH_STATE_FILE, 'utf8')); } catch (_) {}
+  tokenRefreshState = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed
+    : {};
+  if (!tokenRefreshState.accounts || typeof tokenRefreshState.accounts !== 'object' || Array.isArray(tokenRefreshState.accounts)) {
+    tokenRefreshState.accounts = {};
+  }
+  return tokenRefreshState;
+}
+
+function saveTokenRefreshState() {
+  const tmp = `${TOKEN_REFRESH_STATE_FILE}.tmp.${process.pid}`;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(loadTokenRefreshState(), null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, TOKEN_REFRESH_STATE_FILE);
+    try { fs.chmodSync(TOKEN_REFRESH_STATE_FILE, 0o600); } catch (_) {}
+  } catch (error) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+    log('[token-refresh] 写入每日刷新状态失败: ' + redactDiagnosticText(error && error.message || error, 300));
+  }
+}
+
+function persistedTokenRefreshState(uid, signature) {
+  const record = loadTokenRefreshState().accounts[String(uid || '')];
+  if (!record || record.signature !== signature) return null;
+  return record;
+}
+
+function rememberTokenRefreshSuccess(uid, file, auth) {
+  const signature = accountBackupSignature(file);
+  if (!signature) return;
+  const lastRefreshTime = normalizeTokenTimestamp(auth && auth.lastRefreshTime) || Date.now();
+  loadTokenRefreshState().accounts[String(uid)] = {
+    signature,
+    lastRefreshTime,
+    expiresAt: normalizeTokenTimestamp(auth && auth.expiresAt),
+    refreshExpiresAt: normalizeTokenTimestamp(auth && auth.refreshExpiresAt),
+  };
+  saveTokenRefreshState();
+}
+
+/**
+ * 将加密备份 token 刷新后仅存在内存中的公开时间字段合并到账号列表。
+ * 加密备份不能把解密后的 token 写回磁盘，但账号页仍应显示新有效期。
+ */
+function listAccountsWithRuntimeTokenCache() {
+  return listAccounts(DATA_DIR).map((account) => {
+    let file;
+    try { file = accountBackupFile(account.uid); } catch (_) { return account; }
+    const signature = accountBackupSignature(file);
+    const cached = backupAuthRuntimeCache.get(account.uid);
+    if (cached && cached.signature !== signature) {
+      backupAuthRuntimeCache.delete(account.uid);
+    }
+    const persisted = persistedTokenRefreshState(account.uid, signature);
+    const auth = cached && cached.signature === signature && cached.root && cached.root.auth
+      ? cached.root.auth
+      : persisted;
+    if (!auth) return account;
+    return Object.assign({}, account, {
+      tokenExpiresAt: auth.expiresAt || null,
+      refreshExpiresAt: auth.refreshExpiresAt || null,
+      lastRefreshTime: auth.lastRefreshTime || null,
+    });
+  });
+}
+
+/** 刷新备份账号凭证：临期惰性刷新，或当天尚未成功刷新时执行保活。 */
 async function refreshAccountBackupToken(uid, options = {}) {
   const file = path.join(DATA_DIR, 'accounts', uid + '.info');
   let root;
@@ -4154,9 +4236,14 @@ async function refreshAccountBackupToken(uid, options = {}) {
   const auth = root && root.auth && typeof root.auth === 'object' ? root.auth : null;
   if (!auth) return { root, skipped: true, reason: 'no-auth' };
   const now = Date.now();
-  const lastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime);
+  const persisted = persistedTokenRefreshState(uid, sourceSignature);
+  const authLastRefreshTime = normalizeTokenTimestamp(auth.lastRefreshTime) || 0;
+  const persistedLastRefreshTime = normalizeTokenTimestamp(persisted && persisted.lastRefreshTime) || 0;
+  const lastRefreshTime = Math.max(authLastRefreshTime, persistedLastRefreshTime) || null;
+  const lastRefreshDay = lastRefreshTime === null ? null : todayStr(new Date(lastRefreshTime));
   const dailyDue = options.dailyKeepalive === true &&
-    (lastRefreshTime === null || now - lastRefreshTime >= TOKEN_REFRESH_DAY_MS);
+    (lastRefreshDay === null || lastRefreshDay !== todayStr(new Date(now)));
+  if (options.dailyKeepalive === true && !dailyDue) return { root, skipped: true };
   if (options.force !== true && !dailyDue && !shouldRefreshAccessToken(auth, now)) return { root, skipped: true };
 
   const result = await refreshAuthToken(auth, { apiHost: PROFILE.apiHost, fetchImpl: globalThis.fetch, now });
@@ -4167,6 +4254,7 @@ async function refreshAccountBackupToken(uid, options = {}) {
   const nextRoot = Object.assign({}, root, { auth: result.auth });
   if (encryptedAtRest) {
     backupAuthRuntimeCache.set(uid, { signature: sourceSignature, root: nextRoot });
+    rememberTokenRefreshSuccess(uid, file, result.auth);
     log(`[token-refresh] 账号 ${uid} 已刷新（加密备份仅保存在内存）`);
     return { root: nextRoot, refreshed: true, persisted: false };
   }
@@ -4181,6 +4269,7 @@ async function refreshAccountBackupToken(uid, options = {}) {
     return { root, refreshed: false, error: 'write-account-failed: ' + e.message };
   }
   backupAuthRuntimeCache.delete(uid);
+  rememberTokenRefreshSuccess(uid, file, result.auth);
   return { root: nextRoot, refreshed: true, persisted: true };
 }
 
@@ -10370,7 +10459,7 @@ function handleApi(req, res) {
   }
 
   if (req.method === 'GET' && p === '/api/accounts') {
-    const accounts = listAccounts(DATA_DIR);
+    const accounts = listAccountsWithRuntimeTokenCache();
     const checkinAutomationEnabled = readAutomations(DATA_DIR).some(task => task.enabled && stepsContainCheckin(task.steps));
     const cache = loadCheckinCache();
     const today = todayStr();

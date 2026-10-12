@@ -114,7 +114,7 @@ test('daemon behavior change ships a version and build bump so stale daemons are
   const buildId = daemonSource.match(/const DAEMON_BUILD_ID = '([^']+)'/);
   assert.ok(version && buildId, 'DAEMON_VERSION/DAEMON_BUILD_ID not found');
   assert.notEqual(version[1], '1.2.28', 'DAEMON_VERSION must be incremented for a daemon behavior change');
-  assert.match(buildId[1], /^release-1\.2\.32-/, 'DAEMON_BUILD_ID must be rewritten for the new build');
+  assert.match(buildId[1], /^release-1\.2\.35-/, 'DAEMON_BUILD_ID must be rewritten for the new build');
 });
 
 test('launcher httpGet uses a budget aligned with the daemon probe cost', () => {
