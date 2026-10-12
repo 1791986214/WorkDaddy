@@ -838,6 +838,9 @@ func inspectExactProcess(pid int, expectedPath string, label string) (bool, int,
 		return false, exitIdentityMismatch, fmt.Errorf("PID %d %s executable path is unavailable", pid, label)
 	}
 	if !samePath(actual, expectedPath) {
+		if processNameDiffers(filepath.Base(actual), expectedPath) {
+			return false, 0, nil
+		}
 		return false, exitIdentityMismatch, fmt.Errorf("PID %d is %s, expected %s", pid, actual, expectedPath)
 	}
 	return true, 0, nil

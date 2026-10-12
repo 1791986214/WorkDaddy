@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,5 +85,26 @@ func TestLifecycleIgnoresRecycledSystemPID(t *testing.T) {
 			}
 		}
 		t.Fatal("System process disappeared")
+	}
+}
+
+func TestLifecycleIgnoresRecycledReadablePID(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	dir, err := dataDir(profileCodeCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// The test executable has a readable path but is not bundled Node.
+	if err := os.WriteFile(filepath.Join(dir, ".daemon.lock"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := stopLifecycle(profileCodeCN, t.TempDir(), false); code != 0 {
+		t.Fatalf("recycled PID for unrelated readable process blocks cleanup: %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".daemon.lock")); !os.IsNotExist(err) {
+		t.Fatalf("stale lock remains: %v", err)
 	}
 }
