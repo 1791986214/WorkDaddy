@@ -1545,7 +1545,9 @@ function nativeDaemonStatusMatches(status) {
   );
 }
 
-async function waitForNativeDaemon(attempts = 40) {
+// 原生 helper/PowerShell/CIM 冷启动可能超过 10 秒；给 watchdog/daemon 60 秒完成初始化，
+// 避免第一次等待失败后重复清理并制造第二个启动竞态。
+async function waitForNativeDaemon(attempts = 240) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) await sleep(250);
     const status = await readStatus();

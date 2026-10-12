@@ -78,6 +78,14 @@ test('native daemon reuse requires matching privilege, profile, build, data and 
   assert.match(src, /function hasElevatedSessionConsent[\s\S]*--check-elevated-session/);
 });
 
+test('native daemon wait allows the watchdog up to 60 seconds to become ready', () => {
+  const src = read('scripts/win-launcher.js');
+  const start = src.indexOf('async function waitForNativeDaemon(');
+  const end = src.indexOf('\n}', start);
+  assert.ok(start >= 0 && end > start);
+  assert.match(src.slice(start, end), /attempts\s*=\s*240/);
+});
+
 test('native consent policy rejects missing, corrupt, foreign and no-longer-eligible consent', (t) => {
   const { spawnSync } = require('node:child_process');
   const os = require('node:os');

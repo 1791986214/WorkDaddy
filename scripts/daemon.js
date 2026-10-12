@@ -481,13 +481,14 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.18：自动化 session.create 可选 cwd（绝对路径）/ workspace（侧栏工作区名）指定新会话
 //         工作目录；工作区不存在或绑定校验不通过时拒绝发送，不退回默认目录。
 // 1.2.20：CodeBuddy 原生安全存储不可用时保护已有加密会话，并给出钥匙串/密钥环修复提示。
-// 1.2.29：/api/status 的客户端运行状态改为后台定时刷新 + 请求直读缓存。Windows 上
+// 1.2.30：/api/status 的客户端运行状态改为后台定时刷新 + 请求直读缓存。Windows 上
 //         safeClientRunning() 会冷启 PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），
 //         在请求线程里执行会把状态接口拖到远超 launcher HTTP 发现预算的程度，温启动
 //         时 launcher 发现不到已在监听的 daemon，误选备用 UI 端口后失败退出。
-//         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS。
-const DAEMON_VERSION = '1.2.29';
-const DAEMON_BUILD_ID = 'release-1.2.29-20261012-status-nonblocking';
+//         launcher 的 httpGet 预算同步对齐到 HTTP_GET_TIMEOUT_MS；Windows app.asar
+//         页面归属与 CDP 目标等待窗口也同步修复。
+const DAEMON_VERSION = '1.2.30';
+const DAEMON_BUILD_ID = 'release-1.2.30-20261012-windows-startup-followup';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
