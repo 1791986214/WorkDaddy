@@ -5228,9 +5228,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 官方新版 teams 工具条会把背景直接写在 tooltip 触发器的元素样式上，
     // 主题 CSS 即使带 !important 也可能被 React 重渲染后的内联值盖回去。
     // 毛玻璃主题下按实际节点写入内联透明背景，并在节点重建时重新应用。
+    // 非毛玻璃主题下，只有此前打过补丁的节点才需要清理；没有任何补丁时直接短路，
+    // 避免每次 onDomChange 都白跑一次全文档复合选择器查询
+    // （实测该路径是 querySelectorAll 的主要来源之一）。
+    var glassTriggerPatched = false;
     function syncGlassComposerTriggerBackgrounds() {
       var html = document.documentElement;
       var glass = html && html.getAttribute('data-wbs-theme-id') === 'nebula';
+      if (!glass && !glassTriggerPatched) return;
+      glassTriggerPatched = glass;
       var selector = '.teams-container .cr-input-toolbar__right > span.cr-voice-trigger-tooltip,' +
         '.teams-container .cr-input-toolbar__right > span.cr-context-usage-tooltip-trigger,' +
         '.teams-container .cr-input-toolbar__right > span.cr-enhance-button-tooltip';
@@ -5278,14 +5284,25 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     // 【稳定性】body 级 observer 只监听子节点增删（不再监听 class 属性变化），且处理 rAF 节流到每帧最多一次。
     // 切会话/长消息列表重渲染会产生海量 mutation，若每批都同步跑 watchSend(getComputedStyle)/syncQueueTags，
     // 会形成强制样式重算 + 全量扫描风暴占满主线程（切会话卡死的主因）。
+    // 合帧 + 最小间隔双限流。合帧只保证「每帧最多一次」，而会话流式输出时
+    // mutation 每帧都有，合帧形同虚设；叠加 120ms 下限可把最坏情况压到 ≤8 次/秒。
     var domChangePending = false;
+    var domChangeLastAt = 0;
+    var DOM_CHANGE_MIN_GAP_MS = 120;
+    function runDomChange() {
+      domChangePending = false;
+      domChangeLastAt = Date.now();
+      if (alive) onDomChange();
+    }
     function scheduleDomChange() {
       if (domChangePending) return;
       domChangePending = true;
-      requestBuildFrame(function () {
-        domChangePending = false;
-        if (alive) onDomChange();
-      });
+      var wait = DOM_CHANGE_MIN_GAP_MS - (Date.now() - domChangeLastAt);
+      if (wait > 0) {
+        setTimeout(runDomChange, wait);
+      } else {
+        requestBuildFrame(runDomChange);
+      }
     }
     if (typeof MutationObserver !== 'undefined') {
       bodyObserver = new MutationObserver(scheduleDomChange);
