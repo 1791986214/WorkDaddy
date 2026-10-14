@@ -492,8 +492,9 @@ const primaryAccountStore = createPrimaryAccountStore(DATA_DIR, (uid) => fs.exis
 // 1.2.37：新版账号个人身份档案支持确认复制、备份及 CDP 刷新，兼容旧版全局目录。
 // 1.2.38：防止 --probe-client-running 探测进程再次派生探测进程；监控仅由持有单实例锁的 daemon 启动。
 // 1.2.39：限制 macOS pgrep 探针和父进程等待时间，避免系统过载时探针长期堆积。
-const DAEMON_VERSION = '1.2.39';
-const DAEMON_BUILD_ID = 'release-1.2.39-20261013-probe-timeout-cap';
+// 1.2.40：周期性客户端运行探测改用 tasklist 轻量存在性检查（不经 WMI），CIM 进程查询加 -Filter 服务端过滤，刷新间隔 5s→15s（可用 WORKDADDY_CLIENT_REFRESH_MS 覆盖）；完整 CIM 验证仅保留给 /api/client/relaunch 等用户主动操作。
+const DAEMON_VERSION = '1.2.40';
+const DAEMON_BUILD_ID = 'release-1.2.40-20261014-client-probe-wmi';
 const usageReporter = createUsageReporter({ profile: PROFILE.id, version: DAEMON_VERSION });
 configureAutomationRuntime({version: DAEMON_VERSION, profileId: PROFILE.id, platform: process.platform});
 const automationDiscovery = createAutomationDiscovery({
@@ -2694,6 +2695,40 @@ function safeClientRunning() {
   }
 }
 
+// 轻量客户端存在性探测：仅供周期性状态刷新（/api/status 展示、调试端口丢失检测）。
+// Windows 用 tasklist（原生 NT API，不经 WMI/PowerShell）：原实现每 5s 冷启 PowerShell
+// 做两轮 Win32_Process 全量枚举 + 对每个匹配进程 GetOwner（实测 10 个宿主进程的
+// GetOwner 就要 ~1.4s），导致 WmiPrvSE 持续高 CPU。账号切换、一键恢复等安全路径仍走
+// safeClientRunning() 的完整 CIM 验证，本函数只回答"在不在跑"。
+function lightClientRunning() {
+  try {
+    if (IS_WIN) {
+      const names = [...PROFILE_BINARY_NAMES];
+      let probed = false;
+      for (const name of names) {
+        const result = spawnSync('tasklist', ['/FI', `IMAGENAME eq ${name}`, '/NH', '/FO', 'CSV'], {
+          encoding: 'utf8', timeout: 5000, windowsHide: true,
+        });
+        if (result.error || result.status !== 0) continue;
+        probed = true;
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`"${escaped}"\\s*,\\s*"\\d+"`, 'i').test(String(result.stdout || ''))) return true;
+      }
+      return probed ? false : null;
+    }
+    if (IS_LINUX) {
+      return linuxWorkBuddyPids(WORKBUDDY_BINARY).length > 0;
+    }
+    const result = spawnSync('pgrep', ['-f', WORKBUDDY_APP], {
+      stdio: 'ignore', timeout: CLIENT_RUNNING_MAC_SCAN_TIMEOUT_MS,
+    });
+    if (result.error || result.status === null) return null;
+    return result.status === 0;
+  } catch (_) {
+    return null;
+  }
+}
+
 // /api/status 曾直接在请求线程里调用 safeClientRunning()：Windows 上这会同步冷启
 // PowerShell 做 CIM 进程枚举（实测 2.4-6.7s），把状态接口拖到远超 launcher HTTP
 // 探测预算（1500ms）的程度，温启动时 launcher 发现不到已在监听的 daemon，误选
@@ -2703,7 +2738,16 @@ function safeClientRunning() {
 // 注意：刷新必须走一次性子进程（--probe-client-running）——同步探测会阻塞 daemon
 // 事件循环数秒，放在主线程里只会把「每次请求慢」变成「周期性不可用」。
 const clientRunningState = { value: null, checkedAt: 0 };
-const CLIENT_RUNNING_REFRESH_MS = 5000;
+// 客户端运行状态仅为诊断/展示用途（/api/status、调试端口丢失检测）。
+// 原值 5000 过密：Windows 每轮探测都要冷启 PowerShell 做 CIM 进程枚举，
+// 实测单轮 2.4-6.7s，5s 间隔等于让 WMI 枚举几乎不间断执行（WmiPrvSE 高 CPU）。
+// 配合周期性探测改用 lightClientRunning() 后负担已大幅下降；如需更快响应可调小此值。
+const CLIENT_RUNNING_REFRESH_MS = 15000;
+// 环境变量覆盖延迟到调用时读取：vm 测试切片会原样执行本段代码，而测试上下文
+// 不提供 process，顶层读取会直接抛 ReferenceError。
+function clientRunningRefreshDelay() {
+  return Number(process.env && process.env.WORKDADDY_CLIENT_REFRESH_MS) || CLIENT_RUNNING_REFRESH_MS;
+}
 // macOS 的 pgrep 会扫描所有进程；系统过载时必须快速返回未知，不能让多个慢探针叠加。
 const CLIENT_RUNNING_MAC_SCAN_TIMEOUT_MS = 2000;
 // Windows 的验证包含 CIM 查询，保留较长预算；macOS 探针则在扫描超时前结束。
@@ -2733,7 +2777,7 @@ function refreshClientRunning() {
 // --probe-client-running 也会加载本文件，提前刷新会递归拉起探测子进程。
 function startClientRunningMonitor() {
   refreshClientRunning().catch(() => {});
-  const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, CLIENT_RUNNING_REFRESH_MS);
+  const timer = setInterval(() => { refreshClientRunning().catch(() => {}); }, clientRunningRefreshDelay());
   if (timer && typeof timer.unref === 'function') timer.unref();
 }
 
@@ -2893,7 +2937,7 @@ function queryWindowsWorkBuddyProcesses() {
   const names = [...PROFILE_BINARY_NAMES].map((name) => `\"${name}\"`).join(',');
   const helper = path.join(__dirname, 'windows-process-boundary.ps1');
   const command = buildNativeProcessQuery(helper,
-    `$names=@(${names}); Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $names -contains $_.Name }`);
+    `$names=@(${names}); Get-CimInstance Win32_Process -Filter (($names | ForEach-Object { "Name='$_'" }) -join ' OR ') -ErrorAction Stop | Where-Object { $names -contains $_.Name }`);
   const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
     encoding: 'utf8', timeout: 10000, windowsHide: true,
   });
@@ -12651,7 +12695,9 @@ process.on('unhandledRejection', (reason) => {
 // 一次性子进程模式必须等到 safeClientRunning() 所需的所有依赖完成初始化后再执行。
 // 放在 daemon 锁、HTTP 服务和后台任务启动前，探测进程不会抢占正常 daemon 实例。
 if (PROBE_CLIENT_RUNNING) {
-  process.stdout.write(JSON.stringify({ running: safeClientRunning() }));
+  // 周期性状态刷新只做轻量存在性探测（tasklist，不经 WMI）；
+  // 完整 CIM 验证保留给 /api/client/relaunch 等用户主动操作。
+  process.stdout.write(JSON.stringify({ running: lightClientRunning() }));
   process.exit(0);
 }
 

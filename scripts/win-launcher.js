@@ -432,7 +432,7 @@ function getWorkBuddyProcesses() {
   const names = [...PROFILE_PROCESS_NAMES].map((name) => `\"${name}\"`).join(',');
   const command = buildNativeProcessQuery(
     path.join(SCRIPTS_DIR, 'windows-process-boundary.ps1'),
-    `$names=@(${names}); Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $names -contains $_.Name }`
+    `$names=@(${names}); Get-CimInstance Win32_Process -Filter (($names | ForEach-Object { "Name='$_'" }) -join ' OR ') -ErrorAction Stop | Where-Object { $names -contains $_.Name }`
   );
   const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
     encoding: 'utf8', timeout: 10000, windowsHide: true,
