@@ -134,7 +134,9 @@ test('client running cache refreshes in the background and survives probe failur
     __filename: 'daemon.js',
     Date,
     setInterval: (callback, delay) => {
-      assert.equal(delay, 5000);
+      // 1.2.40：默认刷新间隔 5s→15s（周期性探测已改用 tasklist 轻量存在性检查，
+      // 不再每轮冷启 PowerShell 做 CIM 枚举；可用 WORKDADDY_CLIENT_REFRESH_MS 覆盖）。
+      assert.equal(delay, 15000);
       refreshTimer = callback;
       return { unref() {} };
     },
